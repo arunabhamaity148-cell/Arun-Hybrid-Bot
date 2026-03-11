@@ -95,3 +95,47 @@ SIGNAL_COOLDOWN_MINUTES: int = 30
 # ─── FVG Optional Mode ───────────────────────────────────────────────────────
 
 FVG_OPTIONAL: bool = True
+
+# ─── Multi-TF FVG (NEW) ───────────────────────────────────────────────────────
+# 15m FVG er sathe 1h FVG o check kora hobe confluence er jonno.
+# 1h FVG pass korle higher conviction. Na korle signal weak marka dewa hobe.
+# MULTITF_FVG_REQUIRED = True mane 1h FVG mandatory, False mane optional (warn only)
+MULTITF_FVG_REQUIRED: bool = False        # False = warn but don't block
+FVG_1H_LOOKBACK: int = 15                 # 1h candles e kototuku pechone dekhbo
+
+# ─── Pullback Quality Filter (NEW) ───────────────────────────────────────────
+# Pump peak theke current price kototuku nemeche.
+# 30%-62% retracement = ideal FVG/OB zone (Fibonacci golden zone)
+# < 30% = too shallow, price ekhono pump e ache, risky entry
+# > 78% = structure likely broken, skip
+PULLBACK_MIN_PCT: float = 30.0            # minimum retracement %
+PULLBACK_MAX_PCT: float = 62.0            # maximum retracement %
+PULLBACK_LOOKBACK_CANDLES: int = 96       # 15m * 96 = last 24 hours e peak khunjo
+# Core pairs (BTC/ETH etc) er jonno pullback filter skip korbo
+# Karon core pairs pump-dump nature na, steady trend e thake
+PULLBACK_SKIP_CORE_PAIRS: bool = True
+
+# ─── Pump Age Filter (NEW) ────────────────────────────────────────────────────
+# Gainer coin er pump kotokhon age shuru hoyeche seta check kore.
+# Niye pump = fresh momentum, trade newa safe
+# Purono pump = late entry, bag holding risk
+# Candles in 15m: 8 candles = 2 hours
+PUMP_AGE_MAX_CANDLES: int = 8             # 15m * 8 = 2 ghanta er modhye pump shuru
+# Volume threshold: pump candle ke identify korte minimum volume
+PUMP_IDENTIFY_VOL_MULTIPLIER: float = 2.5 # pump candle volume avg er 2.5x hote hobe
+# Core pairs er jonno pump age skip (BTC/ETH steady move kore, single pump candle thake na)
+PUMP_AGE_SKIP_CORE_PAIRS: bool = True
+
+# ─── Relative Volume Score (NEW) ─────────────────────────────────────────────
+# Current logic: aajker volume vs 20-day average — coarse, noise thake
+# Better: 2 layer check
+#   Layer 1 (1h): Last 1h volume vs same hour yesterday — intraday comparison
+#   Layer 2 (15m): Last 15m candle volume vs last 5 candles avg — micro momentum
+# Duto layer e HIGH = real accumulation, trade nao
+# Ek layer HIGH = marginal, warn but continue
+# Duto layer LOW = skip
+RELVOL_1H_MIN_MULTIPLIER: float = 1.5    # 1h volume must be 1.5x yesterday same hour
+RELVOL_15M_MIN_MULTIPLIER: float = 1.8   # last 15m candle must be 1.8x recent 5-candle avg
+# Gainer pairs er jonno strict threshold (already pumped, volume must confirm continuation)
+RELVOL_GAINER_1H_MULTIPLIER: float = 2.0
+RELVOL_GAINER_15M_MULTIPLIER: float = 2.0
