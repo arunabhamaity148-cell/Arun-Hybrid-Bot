@@ -10,6 +10,7 @@ Filter chain (11 steps):
   F4B Pullback Quality    — 30–62% Fibonacci retracement (NEW)
   F4C Pump Age            — pump must be < 2hr old (NEW)
   F4D Relative Volume     — 2-layer 1h + 15m vol check (NEW)
+  F4E Sell Pressure       — pullback candle quality, detects distribution (NEW)
   F5  Volume Confirm      — CHoCH candle 2x avg
   F6  EMA Trend           — 1h EMA21 alignment
   F7  RR Validation       — real RR >= 2.5
@@ -33,6 +34,7 @@ from filters.fvg import check_fvg
 from filters.pullback_quality import check_pullback_quality
 from filters.pump_age import check_pump_age
 from filters.relative_volume import check_relative_volume
+from filters.sell_pressure import check_sell_pressure
 from filters.volume_confirm import check_volume_confirm
 from filters.ema_trend import check_ema_trend
 from filters.rr_validator import check_rr_validator
@@ -183,6 +185,18 @@ class SignalEngine:
         result.filters.append(FilterResult("4D", "RELVOL", passed, msg))
         if not passed:
             result.skip_reason = "relative volume too low — no real accumulation"
+            return result
+
+        # ── F4E: Sell Pressure Check (NEW) ───────────────────────────────────
+        # Checks if pullback candles show distribution (high vol + big red bodies)
+        # vs healthy retracement (low vol + small bodies = sellers are weak)
+        # Skipped for core pairs automatically (config.SELL_PRESSURE_SKIP_CORE_PAIRS)
+        passed, msg = await check_sell_pressure(
+            symbol, direction, is_core_pair=is_core
+        )
+        result.filters.append(FilterResult("4E", "SELL_PRESSURE", passed, msg))
+        if not passed:
+            result.skip_reason = "sell pressure too high — distribution pattern detected"
             return result
 
         # ── F5: Volume Confirmation (CHoCH candle) ────────────────────────────
