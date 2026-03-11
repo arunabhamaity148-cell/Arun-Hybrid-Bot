@@ -40,6 +40,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("signals", self._cmd_signals))
         self._app.add_handler(CommandHandler("block", self._cmd_block))
         self._app.add_handler(CommandHandler("help", self._cmd_help))
+        self._app.add_handler(CommandHandler("backtest", self._cmd_backtest))
 
         await self._app.initialize()
         await self._app.start()
@@ -94,6 +95,7 @@ class TelegramBot:
             "/block SHIB — Manually block a coin from signals\n"
             "/status — Show current pair list, last scan, BTC regime, F&G\n"
             "/signals — Show today's all signals\n"
+            "/backtest BTCUSDT 30 LONG — Run 30-day walk-forward backtest\n"
             "/help — This message\n\n"
             "⚠️ Bot is <b>signal-only</b> — no auto trading."
         )
@@ -198,6 +200,59 @@ class TelegramBot:
                 f"⏰ {s['time']}"
             )
         await update.message.reply_html("\n".join(lines))
+
+
+    async def _cmd_backtest(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._is_authorised(update):
+            return
+
+        args = ctx.args
+        # Usage: /backtest SOLUSDT 30 LONG
+        # Defaults: 30 days, LONG, if not specified
+        symbol = "BTCUSDT"
+        days = 30
+        direction = "LONG"
+
+        if len(args) >= 1:
+            symbol = args[0].upper()
+            if not symbol.endswith("USDT"):
+                symbol += "USDT"
+        if len(args) >= 2:
+            try:
+                days = int(args[1])
+                days = max(7, min(days, 90))  # clamp 7-90 days
+            except ValueError:
+                pass
+        if len(args) >= 3 and args[2].upper() in ("LONG", "SHORT"):
+            direction = args[2].upper()
+
+        is_core = symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT"]
+
+        await update.message.reply_html(
+            f"⏳ Running {days}-day walk-forward backtest for "            f"<b>{symbol}</b> {direction}...
+"            f"This may take 30-60 seconds."
+        )
+
+        try:
+            from backtest.backtest_engine import backtest_engine
+            result = await backtest_engine.run(
+                symbol=symbol,
+                direction=direction,
+                period_days=days,
+                timeframe="15m",
+                is_core_pair=is_core,
+            )
+            if result.total_signals == 0:
+                await update.message.reply_html(
+                    f"📊 Backtest for <b>{symbol}</b> {direction} {days}d
+"                    f"No signals found in this period.
+"                    f"Try a different symbol or longer period."
+                )
+            else:
+                await update.message.reply_html(result.telegram_summary())
+        except Exception as exc:
+            logger.error(f"Backtest command failed: {exc}", exc_info=True)
+            await update.message.reply_text(f"Backtest failed: {exc}")
 
 
 telegram_bot = TelegramBot()
