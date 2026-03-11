@@ -131,7 +131,34 @@ class HybridEngine:
 
         fg_val = self._fear_greed["value"]
         fg_class = self._fear_greed["value_classification"]
-        caution = fg_val < config.FEAR_GREED_CAUTION_THRESHOLD
+        caution = fg_val < config.FEAR_GREED_CAUTION_THRESHOLD  # kept for Telegram warning
+
+        # Direction-aware Fear & Greed blocking (NEW)
+        if config.FEAR_GREED_DIRECTION_FILTER:
+            if fg_val <= config.FEAR_GREED_CAPITULATION_THRESHOLD:
+                fg_long_blocked = False
+                fg_short_blocked = False
+                fg_state = f"CAPITULATION ({fg_val}) — contrarian LONG+SHORT allowed"
+            elif fg_val < config.FEAR_GREED_LONG_MIN:
+                fg_long_blocked = True
+                fg_short_blocked = False
+                fg_state = f"EXTREME FEAR ({fg_val}) — LONG blocked, SHORT only"
+            elif fg_val >= config.FEAR_GREED_EUPHORIA_THRESHOLD:
+                fg_long_blocked = False
+                fg_short_blocked = False
+                fg_state = f"EUPHORIA ({fg_val}) — contrarian LONG+SHORT allowed"
+            elif fg_val > config.FEAR_GREED_SHORT_MAX:
+                fg_long_blocked = False
+                fg_short_blocked = True
+                fg_state = f"EXTREME GREED ({fg_val}) — SHORT blocked, LONG only"
+            else:
+                fg_long_blocked = False
+                fg_short_blocked = False
+                fg_state = f"NORMAL ({fg_val})"
+        else:
+            fg_long_blocked = False
+            fg_short_blocked = False
+            fg_state = f"{fg_val} ({fg_class})"
 
         core_syms = " ".join(p.replace("USDT", "") for p in config.CORE_PAIRS)
         gainer_syms = " ".join(
@@ -153,7 +180,7 @@ class HybridEngine:
         self._btc_regime_cache = regime_short
 
         caution_str = " — ⚠️ CAUTION MODE" if caution else ""
-        print(f"😨 Fear & Greed: {fg_val} ({fg_class}){caution_str}")
+        print(f"😨 Fear & Greed: {fg_state}{caution_str}")
 
         pair_count = len(pairs)
         print(f"📋 Active Pairs ({pair_count}): {core_syms}", end="")
@@ -180,6 +207,14 @@ class HybridEngine:
             print(f"\n🔍 {symbol}:")
             try:
                 for direction in ("LONG", "SHORT"):
+                    # Fear & Greed direction block (NEW)
+                    if direction == "LONG" and fg_long_blocked:
+                        print(f"  ⛔ F&G BLOCK: LONG skipped — {fg_state}")
+                        continue
+                    if direction == "SHORT" and fg_short_blocked:
+                        print(f"  ⛔ F&G BLOCK: SHORT skipped — {fg_state}")
+                        continue
+
                     news_mode = scanner.is_news_flagged(symbol)
                     is_gainer = scanner.get_gainer_info(symbol) is not None
                     is_trending = scanner.get_trending_rank(symbol) is not None
