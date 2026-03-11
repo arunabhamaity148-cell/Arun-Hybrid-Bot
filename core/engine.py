@@ -181,7 +181,13 @@ class HybridEngine:
             try:
                 for direction in ("LONG", "SHORT"):
                     news_mode = scanner.is_news_flagged(symbol)
-                    result = await signal_engine.evaluate(symbol, direction, news_mode)
+                    is_gainer = scanner.get_gainer_info(symbol) is not None
+                    is_trending = scanner.get_trending_rank(symbol) is not None
+                    result = await signal_engine.evaluate(
+                        symbol, direction, news_mode,
+                        is_gainer=is_gainer,
+                        is_trending=is_trending,
+                    )
 
                     for line in result.filter_log_lines():
                         print(line)
@@ -281,6 +287,12 @@ class HybridEngine:
             fvg_line = f"📦 FVG Zone: <code>{result.fvg_low:.8g}</code> — <code>{result.fvg_high:.8g}</code>\n"
             entry_label = "FVG touch"
 
+            # Multi-TF confluence badge
+            confluence_badge = ""
+            if getattr(result, "multitf_confluence", False):
+                confluence_badge = " ✨ <b>[MULTI-TF CONFLUENCE]</b>"
+                setup_desc = "Liq Grab + CHoCH + FVG (15m+1h aligned)"
+
             if getattr(result, "fvg_optional_miss", False):
                 setup_desc = "Liquidity Grab + CHoCH (no FVG — CHoCH entry)"
                 fvg_line = "📦 FVG: Not found — entering at CHoCH level\n"
@@ -289,7 +301,7 @@ class HybridEngine:
             choch_val = f"{result.choch_level:.8g}" if result.choch_level else "N/A"
 
             msg = (
-                f"🔥 <b>ARUNABHA HYBRID SIGNAL</b>\n\n"
+                f"🔥 <b>ARUNABHA HYBRID SIGNAL</b>{confluence_badge}\n\n"
                 f"📌 Pair: <b>{result.symbol}</b>\n"
                 f"📊 Setup: {setup_desc}\n"
                 f"{direction_emoji} Direction: <b>{result.direction}</b>\n\n"
