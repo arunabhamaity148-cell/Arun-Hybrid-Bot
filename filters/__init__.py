@@ -8,6 +8,7 @@ filters/ — Arunabha Hybrid Bot v1.0 Signal Filter Chain
   F4B pullback_quality.py — Fibonacci 30–62% retracement from pump peak. [NEW]
   F4C pump_age.py         — Pump must be < 2hr old (gainer/trending pairs). [NEW]
   F4D relative_volume.py  — 2-layer volume: 1h vs yesterday + 15m micro. [NEW]
+  F4E sell_pressure.py    — Pullback candle quality, distribution detection. [NEW]
   F5  volume_confirm.py   — CHoCH candle volume >= 2x avg.
   F6  ema_trend.py        — EMA21 on 1h alignment.
   F7  rr_validator.py     — Real RR >= MIN_RR_RATIO (2.5).
