@@ -41,6 +41,9 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("block", self._cmd_block))
         self._app.add_handler(CommandHandler("help", self._cmd_help))
         self._app.add_handler(CommandHandler("backtest", self._cmd_backtest))
+        self._app.add_handler(CommandHandler("sl", self._cmd_sl))
+        self._app.add_handler(CommandHandler("win", self._cmd_win))
+        self._app.add_handler(CommandHandler("reset", self._cmd_reset_daily))
 
         await self._app.initialize()
         await self._app.start()
@@ -96,6 +99,9 @@ class TelegramBot:
             "/status — Show current pair list, last scan, BTC regime, F&G\n"
             "/signals — Show today's all signals\n"
             "/backtest BTCUSDT 30 LONG — Run 30-day walk-forward backtest\n"
+            "/sl — SL hit হলে report করো (daily protection)\n"
+            "/win — TP hit হলে report করো (streak reset)\n"
+            "/reset — Daily counters reset করো\n"
             "/help — This message\n\n"
             "⚠️ Bot is <b>signal-only</b> — no auto trading."
         )
@@ -202,6 +208,65 @@ class TelegramBot:
         await update.message.reply_html("\n".join(lines))
 
 
+    async def _cmd_sl(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """SL hit report — updates daily protection counters."""
+        if not await self._is_authorised(update):
+            return
+        from core.engine import engine
+        from datetime import timedelta
+        import config
+
+        engine._daily_sl_hits += 1
+        engine._consecutive_sl += 1
+
+        msg_lines = [
+            f"🔴 SL hit recorded.",
+            f"Daily SL hits: {engine._daily_sl_hits}/{config.DAILY_MAX_SL_HITS}",
+            f"Consecutive SL: {engine._consecutive_sl}/{config.CONSECUTIVE_SL_PAUSE}",
+        ]
+
+        if engine._consecutive_sl >= config.CONSECUTIVE_SL_PAUSE:
+            from datetime import datetime
+            import pytz
+            IST = pytz.timezone(config.TIMEZONE)
+            engine._pause_until = datetime.now(IST) + timedelta(minutes=config.CONSECUTIVE_SL_PAUSE_MINUTES)
+            pause_str = engine._pause_until.strftime("%H:%M IST")
+            msg_lines.append(f"\n⏸️ <b>PAUSE ACTIVE</b> — {config.CONSECUTIVE_SL_PAUSE} consecutive SL.")
+            msg_lines.append(f"No signals until <b>{pause_str}</b>. Take a break.")
+            engine._consecutive_sl = 0
+
+        if engine._daily_sl_hits >= config.DAILY_MAX_SL_HITS:
+            msg_lines.append(f"\n🛑 <b>DAILY SL LIMIT REACHED</b> — No more signals today.")
+            msg_lines.append("Come back tomorrow with fresh eyes.")
+
+        await update.message.reply_html("\n".join(msg_lines))
+
+    async def _cmd_win(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """TP hit report — resets consecutive SL counter."""
+        if not await self._is_authorised(update):
+            return
+        from core.engine import engine
+        prev = engine._consecutive_sl
+        engine._consecutive_sl = 0
+        await update.message.reply_html(
+            f"✅ Win recorded. Consecutive SL counter reset (was {prev}).\n"
+            f"Daily signals sent: {engine._daily_signals_sent}"
+        )
+
+    async def _cmd_reset_daily(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Manually reset all daily counters."""
+        if not await self._is_authorised(update):
+            return
+        from core.engine import engine
+        engine._daily_sl_hits = 0
+        engine._daily_signals_sent = 0
+        engine._consecutive_sl = 0
+        engine._pause_until = None
+        await update.message.reply_html(
+            "🔄 Daily counters reset.\n"
+            "SL hits: 0 | Signals: 0 | Consecutive SL: 0 | Pause: OFF"
+        )
+
     async def _cmd_backtest(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._is_authorised(update):
             return
@@ -229,8 +294,7 @@ class TelegramBot:
         is_core = symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT"]
 
         await update.message.reply_html(
-            f"⏳ Running {days}-day walk-forward backtest for "            f"<b>{symbol}</b> {direction}...
-"            f"This may take 30-60 seconds."
+            f"⏳ Running {days}-day walk-forward backtest for <b>{symbol}</b> {direction}...\nThis may take 30-60 seconds."
         )
 
         try:
@@ -244,9 +308,7 @@ class TelegramBot:
             )
             if result.total_signals == 0:
                 await update.message.reply_html(
-                    f"📊 Backtest for <b>{symbol}</b> {direction} {days}d
-"                    f"No signals found in this period.
-"                    f"Try a different symbol or longer period."
+                    f"📊 Backtest for <b>{symbol}</b> {direction} {days}d\nNo signals found in this period.\nTry a different symbol or longer period."
                 )
             else:
                 await update.message.reply_html(result.telegram_summary())
