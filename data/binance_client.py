@@ -287,4 +287,74 @@ class VolumeAnomalyWatcher:
             self._on_anomaly(symbol, multiplier)
 
 
+    async def get_funding_rate(self, symbol: str) -> dict:
+        """
+        Fetch current funding rate for a symbol from Binance Futures.
+
+        Returns dict with:
+          rate: float        — current funding rate (e.g. 0.0001 = 0.01%)
+          rate_pct: float    — rate as percentage (e.g. 0.01)
+          next_funding_time: int  — unix ms when next funding occurs
+          label: str         — human readable: "NEUTRAL" / "HIGH_LONG" / "HIGH_SHORT" / "EXTREME_LONG" / "EXTREME_SHORT"
+          bias: str          — "LONG_HEAVY" / "SHORT_HEAVY" / "NEUTRAL"
+
+        Cached for 5 minutes (funding rate changes every 8 hours, no need to refetch often).
+        Returns safe defaults on error so callers never crash.
+        """
+        cache_key = f"funding:{symbol}"
+        cached = await cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            data = await _get("/fapi/v1/premiumIndex", {"symbol": symbol})
+            rate = float(data.get("lastFundingRate", 0))
+            next_funding_time = int(data.get("nextFundingTime", 0))
+
+            rate_pct = rate * 100  # 0.0001 → 0.01%
+
+            # Label based on magnitude and direction
+            abs_rate = abs(rate_pct)
+            if abs_rate < 0.02:
+                label = "NEUTRAL"
+            elif rate_pct >= 0.10:
+                label = "EXTREME_LONG"   # very crowded long — squeeze risk
+            elif rate_pct >= 0.04:
+                label = "HIGH_LONG"      # many longs — caution on LONG
+            elif rate_pct <= -0.10:
+                label = "EXTREME_SHORT"  # very crowded short — squeeze risk
+            elif rate_pct <= -0.04:
+                label = "HIGH_SHORT"     # many shorts — caution on SHORT
+            else:
+                label = "NEUTRAL"
+
+            # Bias: who is crowded
+            if rate_pct > 0.02:
+                bias = "LONG_HEAVY"
+            elif rate_pct < -0.02:
+                bias = "SHORT_HEAVY"
+            else:
+                bias = "NEUTRAL"
+
+            result = {
+                "rate": rate,
+                "rate_pct": round(rate_pct, 4),
+                "next_funding_time": next_funding_time,
+                "label": label,
+                "bias": bias,
+            }
+            await cache.set(cache_key, result, ttl=300.0)  # cache 5 minutes
+            return result
+
+        except Exception as exc:
+            logger.debug(f"Funding rate fetch failed for {symbol}: {exc}")
+            return {
+                "rate": 0.0,
+                "rate_pct": 0.0,
+                "next_funding_time": 0,
+                "label": "NEUTRAL",
+                "bias": "NEUTRAL",
+            }
+
+
 binance = BinanceClient()
