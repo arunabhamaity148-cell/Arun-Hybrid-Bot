@@ -161,8 +161,7 @@ SELL_PRESSURE_SKIP_CORE_PAIRS: bool = True
 #   F&G 20–79 → Normal:        LONG allowed ✅               SHORT allowed ✅
 #   F&G 80–89 → Extreme Greed: LONG allowed ✅               SHORT BLOCKED ❌
 #   F&G 90–100→ Euphoria:      LONG allowed ✅               SHORT allowed (contrarian) ✅
-USE_DELTA_DATA: bool = True
-CMC_API_KEY: str = os.getenv("CMC_API_KEY", "")  # optional
+
 FEAR_GREED_LONG_MIN: int = 20
 FEAR_GREED_SHORT_MAX: int = 80
 FEAR_GREED_CAPITULATION_THRESHOLD: int = 10
@@ -235,3 +234,11 @@ VOLUME_SPIKE_GUARD_ENABLED: bool = True
 VOLUME_SPIKE_GUARD_MULTIPLIER: float = 3.0   # 3x = pause
 VOLUME_SPIKE_GUARD_LOOKBACK: int = 10         # last 10 candle average
 
+# ─── Priority Updates ──────────────────────────────────────────────────────
+USE_DELTA_DATA: bool = True          # True = Delta candles, False = Binance only
+CMC_API_KEY: str = __import__('os').getenv("CMC_API_KEY", "")  # optional free key
+
+# Ollama (optional free local LLM) — install from ollama.ai
+OLLAMA_ENABLED: bool = False         # True করলে local mistral/llama3 দিয়ে rate করবে
+OLLAMA_URL:     str  = "http://localhost:11434"
+OLLAMA_MODEL:   str  = "mistral"     # বা "llama3"
