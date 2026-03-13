@@ -244,7 +244,7 @@ class HybridEngine:
                         # ── Daily Protection Checks ───────────────────────────
                         # Check 1: Consecutive SL pause
                         if self._pause_until is not None and now_ist < self._pause_until:
-                            remaining_mins = (self._pause_until - now_ist).seconds // 60
+                            remaining_mins = int((self._pause_until - now_ist).total_seconds() // 60)
                             print(f"  ⏸️  CONSEC SL PAUSE: {remaining_mins}min remaining — signal suppressed")
                             continue
 
