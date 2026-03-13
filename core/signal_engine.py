@@ -3,7 +3,9 @@ core/signal_engine.py — Signal Engine for Arunabha Hybrid Bot v1.0
 Runs all filters in sequence for a given pair + direction.
 
 Filter chain (11 steps):
+  F0  News Sentiment       — CryptoPanic bullish/bearish news check (NEW)
   F1  BTC Regime          — hard block LONG in bear
+  F1B BTC 1h Bias         — short-term 1h momentum alignment (NEW)
   F2  Liquidity Grab      — swing wick hunt (15m)
   F3  CHoCH               — structure break confirm
   F4  FVG Multi-TF        — 15m + 1h confluence (UPGRADED)
@@ -12,6 +14,7 @@ Filter chain (11 steps):
   F4D Relative Volume     — 2-layer 1h + 15m vol check (NEW)
   F4E Sell Pressure       — pullback candle quality, detects distribution (NEW)
   F4F Funding Rate        — crowd bias check, blocks crowded direction (NEW)
+  F4G Volume Spike Guard  — pauses signal if 3x+ spike (unpredictable) (NEW)
   F5  Volume Confirm      — CHoCH candle 2x avg
   F6  EMA Trend           — 1h EMA21 alignment
   F7  RR Validation       — real RR >= 2.5
@@ -28,7 +31,10 @@ from typing import Optional
 
 import config
 from data.binance_client import binance
+from filters.news_sentiment import check_news_sentiment
 from filters.btc_regime import check_btc_regime
+from filters.btc_1h_bias import check_btc_1h_bias
+from filters.volume_spike_guard import check_volume_spike_guard
 from filters.liquidity_grab import check_liquidity_grab
 from filters.choch import check_choch
 from filters.fvg import check_fvg
@@ -110,11 +116,29 @@ class SignalEngine:
         is_core = symbol in config.CORE_PAIRS
         is_dynamic = is_gainer or is_trending  # non-core dynamic pair
 
+        # ── F0: News Sentiment (NEW) ─────────────────────────────────────────
+        # CryptoPanic API — bullish news → SHORT block, bearish news → LONG block
+        # Cached 15 minutes to respect rate limits
+        passed, msg = await check_news_sentiment(symbol, direction)
+        result.filters.append(FilterResult("0", "NEWS_SENTIMENT", passed, msg))
+        if not passed:
+            result.skip_reason = "news sentiment against direction"
+            return result
+
         # ── F1: BTC Regime ────────────────────────────────────────────────────
         passed, msg = await check_btc_regime(direction)
         result.filters.append(FilterResult("1", "BTC_REGIME", passed, msg))
         if not passed:
             result.skip_reason = "BTC regime blocked"
+            return result
+
+        # ── F1B: BTC 1h Bias (NEW) ───────────────────────────────────────────
+        # Short-term 1h momentum check — 3/3 candles + EMA alignment = block
+        # Complements F1 (4h macro) with 1h micro momentum
+        passed, msg = await check_btc_1h_bias(direction)
+        result.filters.append(FilterResult("1B", "BTC_1H_BIAS", passed, msg))
+        if not passed:
+            result.skip_reason = "BTC 1h momentum against direction"
             return result
 
         # ── F2: Liquidity Grab ────────────────────────────────────────────────
@@ -223,6 +247,15 @@ class SignalEngine:
                 return result
         else:
             result.funding_label = "DISABLED"
+
+        # ── F4G: Volume Spike Guard (NEW) ────────────────────────────────────
+        # If current candle volume > 3x avg of last 10 → pause (unpredictable)
+        # vs F4D which requires volume (2x+) — F4G caps excessive volume
+        passed, msg = await check_volume_spike_guard(symbol)
+        result.filters.append(FilterResult("4G", "VOL_SPIKE_GUARD", passed, msg))
+        if not passed:
+            result.skip_reason = "volume spike too extreme — wait for next scan"
+            return result
 
         # ── F5: Volume Confirmation (CHoCH candle) ────────────────────────────
         passed, msg = await check_volume_confirm(
