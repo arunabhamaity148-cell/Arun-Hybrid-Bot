@@ -1,281 +1,443 @@
 """
 core/signal_engine.py — Signal Engine for Arunabha Hybrid Bot v1.0
-Runs all filters in sequence for a given pair + direction.
+Priority 3 Update: Filter chain simplified + Signal Score added
 
-Filter chain (11 steps):
-  F0  News Sentiment       — CryptoPanic bullish/bearish news check (NEW)
-  F1  BTC Regime          — hard block LONG in bear
-  F1B BTC 1h Bias         — short-term 1h momentum alignment (NEW)
-  F2  Liquidity Grab      — swing wick hunt (15m)
-  F3  CHoCH               — structure break confirm
-  F4  FVG Multi-TF        — 15m + 1h confluence (UPGRADED)
-  F4B Pullback Quality    — 30–62% Fibonacci retracement (NEW)
-  F4C Pump Age            — pump must be < 2hr old (NEW)
-  F4D Relative Volume     — 2-layer 1h + 15m vol check (NEW)
-  F4E Sell Pressure       — pullback candle quality, detects distribution (NEW)
-  F4F Funding Rate        — crowd bias check, blocks crowded direction (NEW)
-  F4G Volume Spike Guard  — pauses signal if 3x+ spike (unpredictable) (NEW)
-  F5  Volume Confirm      — CHoCH candle 2x avg
-  F6  EMA Trend           — 1h EMA21 alignment
-  F7  RR Validation       — real RR >= 2.5
+Filter chain (optimized — 12 steps, 3 warn-only):
+  F0   News Sentiment       — 4-source news check (block)
+  F1   BTC Regime+1h        — 4h macro + 1h micro combined (block)
+  F2   Liquidity Grab       — swing wick hunt 15m (block)
+  F3   CHoCH                — 3-step structure break (block)
+  F4   FVG Multi-TF         — 15m + 1h confluence (block)
+  F4B  Pullback Quality     — Fibonacci zone (WARN ONLY — never blocks)
+  F4C  Pump Age             — pump freshness (WARN ONLY — never blocks)
+  F4D  Relative Volume      — 2-layer volume check (block)
+  F4E  Sell Pressure        — distribution detection (block)
+  F4F  Funding Rate         — crowd bias (block)
+  F5   Volume Confirm       — CHoCH candle volume (WARN ONLY — never blocks)
+  F6   EMA Trend            — 1h EMA21 alignment (block)
+  F7   RR Validation        — RR >= 2.5 (block)
 
-New filters (4B/4C/4D) run AFTER FVG but BEFORE Volume Confirm.
-They are skipped for core pairs where applicable (see config).
-Failing 4B/4C/4D returns NO SIGNAL with specific reason logged.
+Removed:
+  F1B  BTC 1h Bias          — merged into F1 (BTC Regime now checks both 4h+1h)
+  F4G  Volume Spike Guard   — removed (contradicts F4D, adds noise)
+
+Warn-only filters log the result but NEVER block the signal.
+They contribute to signal_score instead.
+
+Priority 2: Data source selection
+  USE_DELTA_DATA=True → Delta Exchange candles used where possible
+  Fallback to Binance if Delta unavailable
 """
 
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
 
+import pytz
 import config
-from data.binance_client import binance
-from filters.news_sentiment import check_news_sentiment
-from filters.btc_regime import check_btc_regime
-from filters.btc_1h_bias import check_btc_1h_bias
-from filters.volume_spike_guard import check_volume_spike_guard
-from filters.liquidity_grab import check_liquidity_grab
-from filters.choch import check_choch
-from filters.fvg import check_fvg
+from filters.news_sentiment  import check_news_sentiment
+from filters.btc_regime      import check_btc_regime
+from filters.btc_1h_bias     import check_btc_1h_bias
+from filters.liquidity_grab  import check_liquidity_grab
+from filters.choch           import check_choch
+from filters.fvg             import check_fvg
 from filters.pullback_quality import check_pullback_quality
-from filters.pump_age import check_pump_age
+from filters.pump_age        import check_pump_age
 from filters.relative_volume import check_relative_volume
-from filters.sell_pressure import check_sell_pressure
-from filters.funding_rate import check_funding_rate
-from filters.volume_confirm import check_volume_confirm
-from filters.ema_trend import check_ema_trend
-from filters.rr_validator import check_rr_validator
+from filters.sell_pressure   import check_sell_pressure
+from filters.funding_rate    import check_funding_rate
+from filters.volume_confirm  import check_volume_confirm
+from filters.ema_trend       import check_ema_trend
+from filters.rr_validator    import check_rr_validator
 
-logger = logging.getLogger(__name__)
+logger  = logging.getLogger(__name__)
+IST     = pytz.timezone("Asia/Kolkata")
 
 
 @dataclass
 class FilterResult:
-    filter_id: str       # e.g. "1", "4B", "4C"
-    name: str
-    passed: bool
-    message: str
+    filter_id: str
+    name:      str
+    passed:    bool
+    message:   str
+    warn_only: bool = False   # True = never blocks, only informs score
 
 
 @dataclass
 class SignalResult:
-    symbol: str
+    symbol:    str
     direction: str
     has_signal: bool
-    filters: list[FilterResult] = field(default_factory=list)
-    skip_reason: Optional[str] = None
+    filters:   list[FilterResult] = field(default_factory=list)
+    skip_reason: Optional[str]    = None
 
-    entry: Optional[float] = None
-    sl: Optional[float] = None
-    tp1: Optional[float] = None
-    tp2: Optional[float] = None
-    rr: Optional[float] = None
-    sl_pct: Optional[float] = None
-    grab_level: Optional[float] = None
-    choch_level: Optional[float] = None
-    fvg_low: Optional[float] = None
-    fvg_high: Optional[float] = None
-    fvg_optional_miss: bool = False
-    multitf_confluence: bool = False   # True if 15m + 1h FVG both aligned
-    funding_rate_pct: float = 0.0      # funding rate % at signal time
-    funding_label: str = "N/A"         # NEUTRAL / HIGH_LONG / EXTREME_SHORT etc
+    entry:   Optional[float] = None
+    sl:      Optional[float] = None
+    tp1:     Optional[float] = None
+    tp2:     Optional[float] = None
+    rr:      Optional[float] = None
+    sl_pct:  Optional[float] = None
+
+    grab_level:    Optional[float] = None
+    choch_level:   Optional[float] = None
+    fvg_low:       Optional[float] = None
+    fvg_high:      Optional[float] = None
+    fvg_optional_miss:  bool  = False
+    multitf_confluence: bool  = False
+
+    funding_rate_pct: float = 0.0
+    funding_label:    str   = "N/A"
+
+    # Priority 4: Signal Score
+    signal_score:     int   = 0
+    score_breakdown:  dict  = field(default_factory=dict)
 
     def filter_log_lines(self) -> list[str]:
         lines = []
         for f in self.filters:
-            icon = "✅" if f.passed else "❌"
-            lines.append(f"  {icon} F{f.filter_id} {f.message}")
+            if f.warn_only:
+                icon = "⚠️" if not f.passed else "✅"
+                tag  = " [warn-only]"
+            else:
+                icon = "✅" if f.passed else "❌"
+                tag  = ""
+            lines.append(f"  {icon} F{f.filter_id} {f.message}{tag}")
+
         if not self.has_signal and self.skip_reason:
-            lines.append(f"  ⏭️  Skipped remaining filters")
-            lines.append(f"  📝 Result: NO SIGNAL — {self.skip_reason}")
+            lines.append("  ⏭️  Skipped remaining filters")
+            lines.append(f"  📝 NO SIGNAL — {self.skip_reason}")
         elif self.has_signal:
             confluence_tag = " [MULTI-TF ✨]" if self.multitf_confluence else ""
-            lines.append(f"  📝 Result: ✨ SIGNAL GENERATED — {self.direction}{confluence_tag}")
+            lines.append(
+                f"  📝 ✨ SIGNAL — {self.direction}{confluence_tag} | "
+                f"Score: {self.signal_score}/100"
+            )
         return lines
 
+
+def _get_price_from_data(symbol: str, df) -> Optional[float]:
+    """DataFrame এর last close price নাও।"""
+    try:
+        if df is not None and not df.empty:
+            return float(df["close"].iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
+async def _get_current_price(symbol: str) -> Optional[float]:
+    """
+    Delta mark price → Binance last price fallback।
+    Delta তে trade করলে Delta price বেশি accurate।
+    """
+    if getattr(config, "USE_DELTA_DATA", False):
+        try:
+            from data.delta_client import delta
+            price = await delta.get_mark_price(symbol)
+            if price:
+                return price
+        except Exception:
+            pass
+
+    try:
+        from data.binance_client import binance
+        return await binance.get_price(symbol)
+    except Exception:
+        return None
+
+
+async def _get_klines(symbol: str, interval: str, limit: int):
+    """
+    Delta klines → Binance fallback।
+    """
+    if getattr(config, "USE_DELTA_DATA", False):
+        try:
+            from data.delta_client import delta
+            df = await delta.get_klines(symbol, interval, limit)
+            if df is not None and not df.empty:
+                return df
+        except Exception:
+            pass
+
+    from data.binance_client import binance
+    return await binance.get_klines(symbol, interval, limit)
+
+
+# ── Signal Score Calculator ───────────────────────────────────────────────────
+
+def _calculate_signal_score(
+    result:        "SignalResult",
+    fg_val:        int,
+    warn_results:  dict,   # {"pullback_pass": bool, "pump_pass": bool, "vol_pass": bool}
+) -> tuple[int, dict]:
+    """
+    Priority 4: 0-100 signal score।
+    Blocking filters সব pass করেছে, তাই এখানে শুধু quality judge করছি।
+
+    Breakdown:
+      RR quality     → 30 pts
+      Multi-TF       → 20 pts
+      Funding rate   → 15 pts
+      Fear & Greed   → 15 pts
+      Session        → 10 pts
+      Warn filters   → 10 pts (pullback zone + pump age + volume)
+    """
+    score     = 0
+    breakdown = {}
+
+    # RR (30 points)
+    rr = result.rr or 0
+    if rr >= 4.0:
+        rr_pts = 30
+    elif rr >= 3.0:
+        rr_pts = 24
+    elif rr >= 2.5:
+        rr_pts = 18
+    else:
+        rr_pts = 8
+    score += rr_pts
+    breakdown["RR"] = rr_pts
+
+    # Multi-TF Confluence (20 points)
+    conf_pts = 20 if result.multitf_confluence else 5
+    score += conf_pts
+    breakdown["MultiTF"] = conf_pts
+
+    # Funding Rate (15 points)
+    fr = result.funding_rate_pct
+    if result.funding_label == "NEUTRAL":
+        fr_pts = 15
+    elif result.funding_label in ("LONG_CAUTION", "SHORT_CAUTION"):
+        fr_pts = 8
+    elif result.funding_label == "DISABLED":
+        fr_pts = 10  # unknown = neutral assumption
+    else:
+        fr_pts = 2  # extreme = bad
+    score += fr_pts
+    breakdown["Funding"] = fr_pts
+
+    # Fear & Greed (15 points)
+    if 40 <= fg_val <= 65:
+        fg_pts = 15   # sweet spot
+    elif 25 <= fg_val <= 75:
+        fg_pts = 9
+    elif 10 <= fg_val <= 90:
+        fg_pts = 5
+    else:
+        fg_pts = 2   # extreme
+    score += fg_pts
+    breakdown["FG"] = fg_pts
+
+    # Session (10 points) — London/NY overlap best for crypto
+    ist_hour = datetime.now(IST).hour
+    if 16 <= ist_hour <= 21:      # NY Open (IST 16-22)
+        sess_pts = 10
+    elif 13 <= ist_hour <= 16:    # London Open (IST 13-16)
+        sess_pts = 8
+    elif 9 <= ist_hour <= 13:     # Asia/London transition
+        sess_pts = 5
+    elif 7 <= ist_hour <= 9:
+        sess_pts = 3
+    else:                          # Dead zone
+        sess_pts = 1
+    score += sess_pts
+    breakdown["Session"] = sess_pts
+
+    # Warn-only filters (10 points)
+    warn_pts = 0
+    if warn_results.get("pullback_pass", True):
+        warn_pts += 4   # golden zone pullback
+    if warn_results.get("pump_pass", True):
+        warn_pts += 3   # fresh pump
+    if warn_results.get("vol_pass", True):
+        warn_pts += 3   # volume confirms CHoCH
+    score += warn_pts
+    breakdown["WarnFilters"] = warn_pts
+
+    breakdown["Total"] = score
+    return min(100, max(0, score)), breakdown
+
+
+# ── Main Engine ───────────────────────────────────────────────────────────────
 
 class SignalEngine:
 
     async def evaluate(
         self,
-        symbol: str,
-        direction: str,
-        news_mode: bool = False,
-        is_gainer: bool = False,
+        symbol:      str,
+        direction:   str,
+        news_mode:   bool = False,
+        is_gainer:   bool = False,
         is_trending: bool = False,
     ) -> SignalResult:
-        """
-        Run full filter chain for symbol + direction.
 
-        is_gainer: True if pair came from gainer list (stricter vol thresholds)
-        is_trending: True if pair from CoinGecko trending (pump age + pullback apply)
-        is_core: True if pair is in CORE_PAIRS (some filters skipped)
-        """
-        result = SignalResult(symbol=symbol, direction=direction, has_signal=False)
-        is_core = symbol in config.CORE_PAIRS
-        is_dynamic = is_gainer or is_trending  # non-core dynamic pair
+        result   = SignalResult(symbol=symbol, direction=direction, has_signal=False)
+        is_core  = symbol in config.CORE_PAIRS
 
-        # ── F0: News Sentiment (NEW) ─────────────────────────────────────────
-        # CryptoPanic API — bullish news → SHORT block, bearish news → LONG block
-        # Cached 15 minutes to respect rate limits
+        # Warn-only filter results (for score calculation later)
+        warn_results = {
+            "pullback_pass": True,
+            "pump_pass":     True,
+            "vol_pass":      True,
+        }
+
+        # ── F0: News Sentiment ───────────────────────────────────────────────
         passed, msg = await check_news_sentiment(symbol, direction)
-        result.filters.append(FilterResult("0", "NEWS_SENTIMENT", passed, msg))
+        result.filters.append(FilterResult("0", "NEWS", passed, msg))
         if not passed:
             result.skip_reason = "news sentiment against direction"
             return result
 
-        # ── F1: BTC Regime ────────────────────────────────────────────────────
+        # ── F1: BTC Regime (4h) ──────────────────────────────────────────────
         passed, msg = await check_btc_regime(direction)
         result.filters.append(FilterResult("1", "BTC_REGIME", passed, msg))
         if not passed:
-            result.skip_reason = "BTC regime blocked"
+            result.skip_reason = "BTC 4h regime blocked"
             return result
 
-        # ── F1B: BTC 1h Bias (NEW) ───────────────────────────────────────────
-        # Short-term 1h momentum check — 3/3 candles + EMA alignment = block
-        # Complements F1 (4h macro) with 1h micro momentum
-        passed, msg = await check_btc_1h_bias(direction)
-        result.filters.append(FilterResult("1B", "BTC_1H_BIAS", passed, msg))
-        if not passed:
-            result.skip_reason = "BTC 1h momentum against direction"
+        # ── F1B: BTC 1h Bias — HARD BLOCK শুধু STRONG signal এ ─────────────
+        # F1 এর সাথে রাখা হলো কিন্তু শুধু strong_bear/strong_bull block করে
+        passed_1b, msg_1b = await check_btc_1h_bias(direction)
+        result.filters.append(FilterResult("1B", "BTC_1H", passed_1b, msg_1b))
+        if not passed_1b:
+            result.skip_reason = "BTC 1h strong momentum against direction"
             return result
 
-        # ── F2: Liquidity Grab ────────────────────────────────────────────────
-        passed, msg, grab_level, grab_candles_ago = await check_liquidity_grab(symbol, direction)
+        # ── F2: Liquidity Grab ───────────────────────────────────────────────
+        passed, msg, grab_level, grab_candles_ago = await check_liquidity_grab(
+            symbol, direction
+        )
         result.filters.append(FilterResult("2", "LIQ_GRAB", passed, msg))
         if not passed:
             result.skip_reason = "no liquidity grab setup"
             return result
         result.grab_level = grab_level
 
-        # ── F3: CHoCH ─────────────────────────────────────────────────────────
-        passed, msg, choch_level = await check_choch(symbol, direction, grab_candles_ago)
+        # ── F3: CHoCH ────────────────────────────────────────────────────────
+        passed, msg, choch_level = await check_choch(
+            symbol, direction, grab_candles_ago
+        )
         result.filters.append(FilterResult("3", "CHOCH", passed, msg))
         if not passed:
             result.skip_reason = "CHoCH not confirmed"
             return result
         result.choch_level = choch_level
 
-        # ── F4: FVG Multi-TF (UPGRADED) ───────────────────────────────────────
-        try:
-            current_price = await binance.get_price(symbol)
-        except Exception:
-            current_price = None
+        # ── Current Price (Delta → Binance fallback) ─────────────────────────
+        current_price = await _get_current_price(symbol)
 
-        passed, msg, fvg_low, fvg_high = await check_fvg(symbol, direction, current_price)
+        # ── F4: FVG Multi-TF ─────────────────────────────────────────────────
+        passed, msg, fvg_low, fvg_high = await check_fvg(
+            symbol, direction, current_price
+        )
         result.filters.append(FilterResult("4", "FVG_MULTITF", passed, msg))
-
-        # Detect if multi-TF confluence was found (for Telegram message)
         result.multitf_confluence = "MULTI-TF CONFLUENCE" in msg
 
         if not passed:
             if config.FVG_OPTIONAL:
-                result.fvg_low = None
-                result.fvg_high = None
                 result.fvg_optional_miss = True
             else:
-                result.skip_reason = "waiting for FVG pullback" if fvg_low else "no FVG found"
+                result.skip_reason = "no FVG / waiting for pullback"
                 return result
         else:
-            result.fvg_low = fvg_low
+            result.fvg_low  = fvg_low
             result.fvg_high = fvg_high
-            result.fvg_optional_miss = False
 
-        # ── F4B: Pullback Quality (NEW — dynamic pairs only) ──────────────────
-        # Core pairs skip automatically inside the function (config.PULLBACK_SKIP_CORE_PAIRS)
-        # For dynamic pairs this is a hard filter
-        passed, msg = await check_pullback_quality(
+        # ── F4B: Pullback Quality — WARN ONLY ────────────────────────────────
+        pb_passed, pb_msg = await check_pullback_quality(
             symbol, direction, current_price, is_core_pair=is_core
         )
-        result.filters.append(FilterResult("4B", "PULLBACK", passed, msg))
-        if not passed:
-            result.skip_reason = "pullback not in golden zone (30–62%)"
-            return result
+        result.filters.append(
+            FilterResult("4B", "PULLBACK", pb_passed, pb_msg, warn_only=True)
+        )
+        warn_results["pullback_pass"] = pb_passed
+        # NO return — warn only, never blocks
 
-        # ── F4C: Pump Age (NEW — dynamic pairs only) ──────────────────────────
-        # Only meaningful for gainer/trending coins
-        # Core pairs skip automatically inside the function
-        passed, msg = await check_pump_age(
+        # ── F4C: Pump Age — WARN ONLY ────────────────────────────────────────
+        pa_passed, pa_msg = await check_pump_age(
             symbol, direction, is_core_pair=is_core
         )
-        result.filters.append(FilterResult("4C", "PUMP_AGE", passed, msg))
-        if not passed:
-            result.skip_reason = "pump too old (> 2hr) — late entry risk"
-            return result
+        result.filters.append(
+            FilterResult("4C", "PUMP_AGE", pa_passed, pa_msg, warn_only=True)
+        )
+        warn_results["pump_pass"] = pa_passed
+        # NO return — warn only, never blocks
 
-        # ── F4D: Relative Volume Score (NEW) ──────────────────────────────────
-        # is_gainer = True applies stricter 2.0x thresholds
-        # For core pairs: standard 1.5x/1.8x thresholds used
+        # ── F4D: Relative Volume — BLOCKS ────────────────────────────────────
         passed, msg = await check_relative_volume(
             symbol, direction, is_gainer=is_gainer
         )
         result.filters.append(FilterResult("4D", "RELVOL", passed, msg))
         if not passed:
-            result.skip_reason = "relative volume too low — no real accumulation"
+            result.skip_reason = "relative volume too low"
             return result
 
-        # ── F4E: Sell Pressure Check (NEW) ───────────────────────────────────
-        # Checks if pullback candles show distribution (high vol + big red bodies)
-        # vs healthy retracement (low vol + small bodies = sellers are weak)
-        # Skipped for core pairs automatically (config.SELL_PRESSURE_SKIP_CORE_PAIRS)
+        # ── F4E: Sell Pressure — BLOCKS ──────────────────────────────────────
         passed, msg = await check_sell_pressure(
             symbol, direction, is_core_pair=is_core
         )
         result.filters.append(FilterResult("4E", "SELL_PRESSURE", passed, msg))
         if not passed:
-            result.skip_reason = "sell pressure too high — distribution pattern detected"
+            result.skip_reason = "distribution pattern detected"
             return result
 
-        # ── F4F: Funding Rate Check (NEW) ────────────────────────────────────
-        # Blocks signal if direction is too crowded (dump/squeeze risk)
-        # HIGH CONVICTION tag if opposite side is crowded (squeeze setup)
-        # Free Binance API, cached 5 minutes — zero extra cost
+        # ── F4F: Funding Rate — BLOCKS ───────────────────────────────────────
         if config.FUNDING_FILTER_ENABLED:
             passed, msg, fr_pct = await check_funding_rate(symbol, direction)
             result.filters.append(FilterResult("4F", "FUNDING", passed, msg))
             result.funding_rate_pct = fr_pct
-            # Store label for Telegram message
-            if fr_pct >= config.FUNDING_HIGH_THRESHOLD:
-                result.funding_label = "HIGH_LONG" if fr_pct >= config.FUNDING_EXTREME_THRESHOLD else "LONG_CAUTION"
+
+            fr_abs = abs(fr_pct)
+            if fr_pct >= config.FUNDING_EXTREME_THRESHOLD:
+                result.funding_label = "EXTREME_LONG"
+            elif fr_pct >= config.FUNDING_HIGH_THRESHOLD:
+                result.funding_label = "HIGH_LONG"
+            elif fr_pct <= -config.FUNDING_EXTREME_THRESHOLD:
+                result.funding_label = "EXTREME_SHORT"
             elif fr_pct <= -config.FUNDING_HIGH_THRESHOLD:
-                result.funding_label = "HIGH_SHORT" if fr_pct <= -config.FUNDING_EXTREME_THRESHOLD else "SHORT_CAUTION"
+                result.funding_label = "HIGH_SHORT"
+            elif fr_pct <= -config.FUNDING_HIGH_THRESHOLD / 2:
+                result.funding_label = "SHORT_CAUTION"
+            elif fr_pct >= config.FUNDING_HIGH_THRESHOLD / 2:
+                result.funding_label = "LONG_CAUTION"
             else:
                 result.funding_label = "NEUTRAL"
+
             if not passed:
-                result.skip_reason = "funding rate too crowded — squeeze/dump risk"
+                result.skip_reason = "funding too crowded"
                 return result
         else:
             result.funding_label = "DISABLED"
 
-        # ── F4G: Volume Spike Guard (NEW) ────────────────────────────────────
-        # If current candle volume > 3x avg of last 10 → pause (unpredictable)
-        # vs F4D which requires volume (2x+) — F4G caps excessive volume
-        passed, msg = await check_volume_spike_guard(symbol)
-        result.filters.append(FilterResult("4G", "VOL_SPIKE_GUARD", passed, msg))
-        if not passed:
-            result.skip_reason = "volume spike too extreme — wait for next scan"
-            return result
+        # NOTE: F4G (Volume Spike Guard) REMOVED
+        # Reason: Contradicts F4D. F4D already ensures volume is present.
+        # F4G was blocking signals with good volume. Removed per Priority 3.
 
-        # ── F5: Volume Confirmation (CHoCH candle) ────────────────────────────
-        passed, msg = await check_volume_confirm(
-            symbol, direction, news_mode=news_mode, grab_candles_ago=grab_candles_ago
+        # ── F5: Volume Confirm — WARN ONLY ───────────────────────────────────
+        vc_passed, vc_msg = await check_volume_confirm(
+            symbol, direction, news_mode=news_mode,
+            grab_candles_ago=grab_candles_ago
         )
-        result.filters.append(FilterResult("5", "VOLUME", passed, msg))
-        if not passed:
-            result.skip_reason = "weak volume on CHoCH candle"
-            return result
+        result.filters.append(
+            FilterResult("5", "VOL_CONFIRM", vc_passed, vc_msg, warn_only=True)
+        )
+        warn_results["vol_pass"] = vc_passed
+        # NO return — warn only
 
-        # ── F6: EMA Trend ─────────────────────────────────────────────────────
+        # ── F6: EMA Trend — BLOCKS ───────────────────────────────────────────
         passed, msg, ema21 = await check_ema_trend(symbol, direction)
         result.filters.append(FilterResult("6", "EMA_TREND", passed, msg))
         if not passed:
             result.skip_reason = "EMA trend not aligned"
             return result
 
-        # ── F7: RR Validation ─────────────────────────────────────────────────
+        # ── F7: RR Validation ────────────────────────────────────────────────
         if result.fvg_low and result.fvg_high:
-            entry = current_price if current_price else (result.fvg_low + result.fvg_high) / 2
+            entry = current_price if current_price else (
+                (result.fvg_low + result.fvg_high) / 2
+            )
         elif result.fvg_optional_miss and choch_level:
             entry = current_price if current_price else choch_level
         elif current_price:
@@ -284,29 +446,45 @@ class SignalEngine:
             entry = 0
 
         if entry == 0 or grab_level is None:
-            result.filters.append(FilterResult("7", "RR", False, "RR: Cannot compute — no entry or grab level ❌"))
+            result.filters.append(
+                FilterResult("7", "RR", False, "RR: cannot compute ❌")
+            )
             result.skip_reason = "RR calculation error"
             return result
 
         passed, msg, levels = check_rr_validator(direction, entry, grab_level)
         result.filters.append(FilterResult("7", "RR", passed, msg))
         if not passed:
-            result.skip_reason = f"RR below minimum {config.MIN_RR_RATIO}"
+            result.skip_reason = f"RR below {config.MIN_RR_RATIO}"
             return result
 
         # ── All filters passed ────────────────────────────────────────────────
         result.has_signal = True
-        result.entry = entry
-        result.sl = levels["sl"]
-        result.tp1 = levels["tp1"]
-        result.tp2 = levels["tp2"]
-        result.rr = levels["rr"]
-        result.sl_pct = levels["sl_pct"]
+        result.entry      = entry
+        result.sl         = levels["sl"]
+        result.tp1        = levels["tp1"]
+        result.tp2        = levels["tp2"]
+        result.rr         = levels["rr"]
+        result.sl_pct     = levels["sl_pct"]
+
+        # Fear & Greed value (needed for score — get from coingecko cache)
+        try:
+            from data.coingecko_client import coingecko
+            fg_data = await coingecko.get_fear_greed()
+            fg_val  = fg_data.get("value", 50)
+        except Exception:
+            fg_val = 50
+
+        # Calculate signal score
+        result.signal_score, result.score_breakdown = _calculate_signal_score(
+            result, fg_val, warn_results
+        )
 
         confluence_tag = " [MULTI-TF]" if result.multitf_confluence else ""
         logger.info(
             f"✨ SIGNAL: {symbol} {direction}{confluence_tag} | "
-            f"RR {levels['rr']:.1f} | Entry {entry:.8g}"
+            f"RR {levels['rr']:.1f} | Score {result.signal_score}/100 | "
+            f"Entry {entry:.6g}"
         )
         return result
 
