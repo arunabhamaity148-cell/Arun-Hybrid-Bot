@@ -41,6 +41,12 @@ class HybridEngine:
         self._event_loop: asyncio.AbstractEventLoop | None = None
         self._last_signal_time: dict[str, datetime] = {}
 
+        # ── Daily Protection State ────────────────────────────────────────────
+        self._daily_sl_hits: int = 0           # আজকে কতটা SL hit হয়েছে (user manually update করবে)
+        self._daily_signals_sent: int = 0      # আজকে কতটা signal গেছে
+        self._consecutive_sl: int = 0          # পরপর কতটা SL
+        self._pause_until: datetime | None = None  # consecutive SL pause শেষ কখন
+
     def _on_volume_anomaly(self, symbol: str, multiplier: float) -> None:
         scanner.on_volume_anomaly(symbol, multiplier)
         if self._event_loop is not None and not self._event_loop.is_closed():
@@ -124,6 +130,13 @@ class HybridEngine:
             self._signals_today = []
 
         now_str = now_ist.strftime("%H:%M IST")
+
+        # Reset daily counters on new day
+        if self._today_date != today:
+            self._daily_sl_hits = 0
+            self._daily_signals_sent = 0
+            self._consecutive_sl = 0
+            self._pause_until = None
 
         await scanner.refresh_gainers()
         pairs = await scanner.get_active_pairs()
@@ -228,6 +241,23 @@ class HybridEngine:
                         print(line)
 
                     if result.has_signal:
+                        # ── Daily Protection Checks ───────────────────────────
+                        # Check 1: Consecutive SL pause
+                        if self._pause_until is not None and now_ist < self._pause_until:
+                            remaining_mins = (self._pause_until - now_ist).seconds // 60
+                            print(f"  ⏸️  CONSEC SL PAUSE: {remaining_mins}min remaining — signal suppressed")
+                            continue
+
+                        # Check 2: Daily max signals
+                        if self._daily_signals_sent >= config.DAILY_MAX_SIGNALS:
+                            print(f"  🛑 DAILY LIMIT: {config.DAILY_MAX_SIGNALS} signals sent today — done for today")
+                            continue
+
+                        # Check 3: Daily SL hit limit
+                        if self._daily_sl_hits >= config.DAILY_MAX_SL_HITS:
+                            print(f"  🛑 DAILY SL LIMIT: {self._daily_sl_hits} SL hits today — no more signals")
+                            continue
+
                         cooldown_key = f"{symbol}:{direction}"
                         last_sig = self._last_signal_time.get(cooldown_key)
                         cooldown_mins = config.SIGNAL_COOLDOWN_MINUTES
@@ -248,7 +278,43 @@ class HybridEngine:
 
                         self._last_signal_time[cooldown_key] = now_ist
                         self._signal_count_today += 1
+                        self._daily_signals_sent += 1
                         sig_num = self._signal_count_today
+
+                        # ── ChatGPT Signal Rating ─────────────────────────────
+                        from core.ai_rater import rate_signal, rating_emoji, should_suppress
+                        session_label = (
+                            "London Open" if 8 <= now_ist.hour < 11 else
+                            "NY Open" if 19 <= now_ist.hour < 22 else
+                            "Asia Open" if 6 <= now_ist.hour < 9 else
+                            "Regular"
+                        )
+                        ai_rating, ai_reason = await rate_signal(
+                            symbol=symbol,
+                            direction=direction,
+                            rr=result.rr or 0,
+                            btc_regime=regime_short,
+                            fg_val=fg_val,
+                            fg_class=fg_class,
+                            session=session_label,
+                            multitf_confluence=getattr(result, "multitf_confluence", False),
+                            pullback_pct=None,
+                            pump_age_hr=None,
+                            is_gainer=is_gainer,
+                            is_trending=is_trending,
+                            sl_pct=result.sl_pct or 0,
+                            funding_rate_pct=getattr(result, "funding_rate_pct", 0.0),
+                            funding_label=getattr(result, "funding_label", "N/A"),
+                        )
+                        print(f"  🤖 AI Rating: {ai_rating} {rating_emoji(ai_rating)} — {ai_reason}")
+
+                        # Suppress C-rated signals if enabled
+                        if should_suppress(ai_rating):
+                            print(f"  🚫 AI SUPPRESS: C-rated signal blocked")
+                            self._signal_count_today -= 1
+                            self._daily_signals_sent -= 1
+                            break
+
                         signal_data = {
                             "symbol": symbol,
                             "direction": direction,
@@ -260,6 +326,8 @@ class HybridEngine:
                             "scan": scan_id,
                             "time": now_str,
                             "num": sig_num,
+                            "ai_rating": ai_rating,
+                            "ai_reason": ai_reason,
                         }
                         signals_this_scan.append(signal_data)
                         self._signals_today.append(signal_data)
@@ -270,6 +338,8 @@ class HybridEngine:
                             scanner.is_anomaly(symbol),
                             fg_val, fg_class, regime_short, adx_part,
                             now_str, sig_num, caution,
+                            ai_rating=ai_rating,
+                            ai_reason=ai_reason,
                         )
                         break
 
@@ -292,6 +362,7 @@ class HybridEngine:
     async def _send_signal_telegram(
         self, result, gainer_info, trending_rank, is_anomaly,
         fg_val, fg_class, btc_regime, adx_part, now_str, sig_num, caution,
+        ai_rating: str = "N/A", ai_reason: str = "",
     ) -> None:
         try:
             direction_emoji = "🟢" if result.direction == "LONG" else "🔴"
@@ -352,9 +423,11 @@ class HybridEngine:
                 f"📊 <b>Market Context:</b>\n"
                 f"• BTC: {btc_regime} ({adx_part})\n"
                 f"• Fear & Greed: {fg_val} ({fg_class}){caution_line}\n"
+                f"• Funding: {getattr(result, 'funding_rate_pct', 0):+.3f}% [{getattr(result, 'funding_label', 'N/A')}]\n"
                 f"• Session: {session}\n\n"
                 f"⚠️ <b>EXECUTE MANUALLY ON DELTA EXCHANGE</b>\n"
                 f"⏰ {now_str} | Signal #{sig_num} today"
+                + (f"\n\n🤖 <b>AI Rating: {ai_rating}</b> — {ai_reason}" if ai_rating != "N/A" else "")
             )
 
             tg = _get_telegram()
