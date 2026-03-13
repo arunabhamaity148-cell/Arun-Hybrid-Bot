@@ -161,7 +161,8 @@ SELL_PRESSURE_SKIP_CORE_PAIRS: bool = True
 #   F&G 20–79 → Normal:        LONG allowed ✅               SHORT allowed ✅
 #   F&G 80–89 → Extreme Greed: LONG allowed ✅               SHORT BLOCKED ❌
 #   F&G 90–100→ Euphoria:      LONG allowed ✅               SHORT allowed (contrarian) ✅
-
+USE_DELTA_DATA: bool = True
+CMC_API_KEY: str = os.getenv("CMC_API_KEY", "")  # optional
 FEAR_GREED_LONG_MIN: int = 20
 FEAR_GREED_SHORT_MAX: int = 80
 FEAR_GREED_CAPITULATION_THRESHOLD: int = 10
@@ -233,3 +234,4 @@ BTC_1H_BIAS_ENABLED: bool = True
 VOLUME_SPIKE_GUARD_ENABLED: bool = True
 VOLUME_SPIKE_GUARD_MULTIPLIER: float = 3.0   # 3x = pause
 VOLUME_SPIKE_GUARD_LOOKBACK: int = 10         # last 10 candle average
+
