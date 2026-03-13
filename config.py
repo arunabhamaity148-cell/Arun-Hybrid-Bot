@@ -167,3 +167,49 @@ FEAR_GREED_SHORT_MAX: int = 80
 FEAR_GREED_CAPITULATION_THRESHOLD: int = 10
 FEAR_GREED_EUPHORIA_THRESHOLD: int = 90
 FEAR_GREED_DIRECTION_FILTER: bool = True
+
+# ─── Daily Protection Limits (NEW) ───────────────────────────────────────────
+# Max trades per day — তৃতীয় signal এর পরে bot সেদিনের জন্য scan বন্ধ করে না,
+# কিন্তু নতুন signal পাঠানো বন্ধ করে।
+DAILY_MAX_SIGNALS: int = 6               # দিনে সর্বোচ্চ কতটা signal
+
+# Daily loss limit — এতগুলো SL hit হলে বাকি দিন signal বন্ধ
+# (bot নিজে trade করে না, তাই এটা "suggestion" — user কে alert দেবে)
+DAILY_MAX_SL_HITS: int = 3               # ৩টা SL = আজকের জন্য থামো
+
+# Consecutive SL pause — পরপর এতগুলো SL hit হলে ৩০মিনিট pause
+CONSECUTIVE_SL_PAUSE: int = 2            # ২টা consecutive SL = ৩০মিনিট break
+CONSECUTIVE_SL_PAUSE_MINUTES: int = 30
+
+# ─── ChatGPT Signal Rating (NEW) ─────────────────────────────────────────────
+# OpenAI API key — না দিলে rating feature disabled হয়ে যাবে (bot চলবে)
+OPENAI_API_KEY: str = __import__('os').getenv("OPENAI_API_KEY", "")
+
+# GPT model — gpt-4o-mini সবচেয়ে সস্তা, কাজের
+OPENAI_MODEL: str = "gpt-4o-mini"
+
+# False করলে ChatGPT rating সম্পূর্ণ বন্ধ (API key না থাকলে auto-False)
+SIGNAL_AI_RATING_ENABLED: bool = True
+
+# A+ এর নিচে signal suppress করবে কিনা
+# True = C rating signal Telegram এ যাবে না
+# False = সব signal যাবে, rating শুধু দেখাবে
+SIGNAL_AI_SUPPRESS_LOW_RATING: bool = False  # শুরুতে False রাখো, দেখো
+
+# ─── Funding Rate Filter (NEW) ────────────────────────────────────────────────
+# Binance Futures funding rate — প্রতি ৮ ঘন্টায় update হয়, ফ্রি API
+#
+# FUNDING_EXTREME_THRESHOLD: এই % এর বেশি হলে direction block
+#   +0.10% = LONG block (সবাই already long)
+#   -0.10% = SHORT block (সবাই already short)
+#
+# FUNDING_HIGH_THRESHOLD: এই % এ warn করে কিন্তু block না
+#   +0.04% = LONG caution
+#   -0.04% = SHORT caution
+#
+# Neutral zone (-0.04% to +0.04%): normal signal
+# Opposite crowding (e.g. SHORT heavy for LONG signal): HIGH CONVICTION ✅✅
+
+FUNDING_EXTREME_THRESHOLD: float = 0.10   # ±0.10% = extreme, block direction
+FUNDING_HIGH_THRESHOLD: float = 0.04      # ±0.04% = high, warn only
+FUNDING_FILTER_ENABLED: bool = True       # False করলে filter skip
