@@ -11,6 +11,7 @@ Filter chain (11 steps):
   F4C Pump Age            — pump must be < 2hr old (NEW)
   F4D Relative Volume     — 2-layer 1h + 15m vol check (NEW)
   F4E Sell Pressure       — pullback candle quality, detects distribution (NEW)
+  F4F Funding Rate        — crowd bias check, blocks crowded direction (NEW)
   F5  Volume Confirm      — CHoCH candle 2x avg
   F6  EMA Trend           — 1h EMA21 alignment
   F7  RR Validation       — real RR >= 2.5
@@ -35,6 +36,7 @@ from filters.pullback_quality import check_pullback_quality
 from filters.pump_age import check_pump_age
 from filters.relative_volume import check_relative_volume
 from filters.sell_pressure import check_sell_pressure
+from filters.funding_rate import check_funding_rate
 from filters.volume_confirm import check_volume_confirm
 from filters.ema_trend import check_ema_trend
 from filters.rr_validator import check_rr_validator
@@ -70,6 +72,8 @@ class SignalResult:
     fvg_high: Optional[float] = None
     fvg_optional_miss: bool = False
     multitf_confluence: bool = False   # True if 15m + 1h FVG both aligned
+    funding_rate_pct: float = 0.0      # funding rate % at signal time
+    funding_label: str = "N/A"         # NEUTRAL / HIGH_LONG / EXTREME_SHORT etc
 
     def filter_log_lines(self) -> list[str]:
         lines = []
@@ -198,6 +202,27 @@ class SignalEngine:
         if not passed:
             result.skip_reason = "sell pressure too high — distribution pattern detected"
             return result
+
+        # ── F4F: Funding Rate Check (NEW) ────────────────────────────────────
+        # Blocks signal if direction is too crowded (dump/squeeze risk)
+        # HIGH CONVICTION tag if opposite side is crowded (squeeze setup)
+        # Free Binance API, cached 5 minutes — zero extra cost
+        if config.FUNDING_FILTER_ENABLED:
+            passed, msg, fr_pct = await check_funding_rate(symbol, direction)
+            result.filters.append(FilterResult("4F", "FUNDING", passed, msg))
+            result.funding_rate_pct = fr_pct
+            # Store label for Telegram message
+            if fr_pct >= config.FUNDING_HIGH_THRESHOLD:
+                result.funding_label = "HIGH_LONG" if fr_pct >= config.FUNDING_EXTREME_THRESHOLD else "LONG_CAUTION"
+            elif fr_pct <= -config.FUNDING_HIGH_THRESHOLD:
+                result.funding_label = "HIGH_SHORT" if fr_pct <= -config.FUNDING_EXTREME_THRESHOLD else "SHORT_CAUTION"
+            else:
+                result.funding_label = "NEUTRAL"
+            if not passed:
+                result.skip_reason = "funding rate too crowded — squeeze/dump risk"
+                return result
+        else:
+            result.funding_label = "DISABLED"
 
         # ── F5: Volume Confirmation (CHoCH candle) ────────────────────────────
         passed, msg = await check_volume_confirm(
