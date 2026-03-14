@@ -226,17 +226,23 @@ Multi-TF FVG: {multitf_confluence} | Funding: {funding_label}
 === MARKET INTEL (CoinGecko + CoinDesk + CMC) ===
 {intel_str}
 
-=== CRITERIA ===
-A+ = RR≥3.0 + confluence YES + London/NY session + BTC aligned + F&G 20-79 +
-     funding neutral/opposite + bullish intel + strong volume CHoCH candle visible
+=== CONTEXT-AWARE ANALYSIS REQUIRED ===
+Do NOT just look at headlines. Analyze:
+1. Is the news event genuinely bearish/bullish or just noise?
+2. Does the candle structure confirm the setup?
+3. Is volume on the CHoCH candle 2x+ average?
+4. Are there any hidden distribution/accumulation signs?
+5. Does the market phase support this direction?
+
+=== RATING CRITERIA ===
+A+ = RR≥3.0 + confluence + London/NY + BTC aligned + F&G 20-79 +
+     funding neutral/opposite + aligned intel + strong CHoCH volume
 A  = RR≥2.5 + most factors align + 1 minor weakness
-B  = RR≥2.5 but weak session OR no confluence OR slightly crowded OR bearish intel
-C  = Multiple red flags: old pump + no confluence + bad session + extreme funding +
-     bearish intel + price discrepancy + weak candles
+B  = RR≥2.5 but weak session OR no confluence OR slightly crowded OR mixed intel
+C  = Multiple red flags: weak candles + bad session + extreme funding +
+     against-direction news + price discrepancy
 
-Analyze actual OHLCV — look for volume on CHoCH candle, clean structure, body size.
-
-Reply ONLY in this exact format:
+Reply ONLY:
 RATING: X
 REASON: [max 18 words — most important factor]"""
 
