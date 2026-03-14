@@ -60,12 +60,11 @@ async def _daily_summary() -> None:
             lines = [f"📊 <b>Daily Signal Summary — {now_str}</b>", f"Total: {len(signals)} signals\n"]
             for s in signals:
                 d_emoji = "🟢" if s["direction"] == "LONG" else "🔴"
+                score_str    = f" | 🎯{s['score']}/100" if s.get("score") else ""
+                ai_str       = f" | 🤖{s['ai_rating']}" if s.get("ai_rating") and s["ai_rating"] != "N/A" else ""
                 lines.append(
                     f"{d_emoji} #{s['num']} {s['symbol']} {s['direction']} "
-                    f"| Entry {s['entry']:.8g} "
-                    f"| SL {s['sl']:.8g} "
-                    f"| TP1 {s['tp1']:.8g} "
-                    f"| RR {s['rr']:.2f} "
+                    f"| RR {s['rr']:.2f}{score_str}{ai_str} "
                     f"| ⏰ {s['time']}"
                 )
             msg = "\n".join(lines)
