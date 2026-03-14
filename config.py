@@ -69,7 +69,7 @@ USE_DELTA_DATA: bool = True
 # Binance REST endpoints (failover)
 BINANCE_REST_ENDPOINTS: list[str] = [
     "https://fapi.binance.com",
-    "https://fapi.binance.com",
+    "https://fapi1.binance.com",   # backup endpoint
 ]
 
 BINANCE_WS_ENDPOINTS: list[str] = [
