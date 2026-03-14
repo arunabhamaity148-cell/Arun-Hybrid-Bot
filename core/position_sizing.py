@@ -30,13 +30,14 @@ Risk per trade (always ₹5,000 margin):
 import logging
 from dataclasses import dataclass
 from typing import Optional
+import config
 
 logger = logging.getLogger(__name__)
 
-# ── Fixed Constants ───────────────────────────────────────────────────────────
-CAPITAL_PER_TRADE_INR = 5_000    # ₹5,000 margin per trade — always
-MIN_LEVERAGE          = 15
-MAX_LEVERAGE          = 20
+# ── Constants — config.py থেকে পড়া হয়, এখানে change করবে না ─────────────────
+CAPITAL_PER_TRADE_INR = config.CAPITAL_PER_TRADE_INR   # default ₹5,000
+MIN_LEVERAGE          = config.LEVERAGE_MIN             # default 15x
+MAX_LEVERAGE          = config.LEVERAGE_MAX             # default 20x
 USD_TO_INR_FALLBACK   = 83.5     # fallback rate if live fetch fails
 
 
