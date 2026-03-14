@@ -93,7 +93,8 @@ COINGECKO_REFRESH_SECONDS: int = int(os.getenv("COINGECKO_REFRESH_SECONDS", "360
 
 # সবসময় scan হবে এই core pairs
 CORE_PAIRS: list[str] = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT"
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT",
+    "XRPUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT", "MATICUSDT"
 ]
 
 # Dynamic pair filters
@@ -102,9 +103,9 @@ MIN_VOLUME_MULTIPLIER:     float = float(os.getenv("MIN_VOLUME_MULTIPLIER", "3.0
 MIN_MARKET_CAP_USD:        float = float(os.getenv("MIN_MARKET_CAP_USD", "50000000"))
 VOLUME_ANOMALY_MULTIPLIER: float = float(os.getenv("VOLUME_ANOMALY_MULTIPLIER", "5.0"))
 
-MAX_GAINER_PAIRS:   int = 5
-MAX_TRENDING_PAIRS: int = 3
-MAX_TOTAL_PAIRS:    int = 13
+MAX_GAINER_PAIRS:   int = 10   # 5 → 10 (more opportunities)
+MAX_TRENDING_PAIRS: int = 5    # 3 → 5
+MAX_TOTAL_PAIRS:    int = 30   # 13 → 30 (quantity বাড়বে)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🎯 SIGNAL FILTERS — CORE
@@ -282,3 +283,40 @@ WS_HEARTBEAT_INTERVAL:     int   = 20
 # Unused — placeholder
 COINDCX_API_KEY: str = os.getenv("COINDCX_API_KEY", "")
 COINDCX_SECRET:  str = os.getenv("COINDCX_SECRET",  "")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ⚡ ADVANCED SIGNAL SCORING (OFI / CVD / CROSS-BASIS / HEATMAP)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# OFI (Order Flow Imbalance) — aggTrades থেকে buyer vs seller volume
+# True = OFI calculate করে score এ bonus যোগ করো (0-10 pts)
+OFI_ENABLED: bool = True
+OFI_TRADE_LIMIT: int = 500         # aggTrades কতটা নেবো (more = accurate, slower)
+OFI_STRONG_THRESHOLD: float = 0.35 # এর বেশি OFI ratio = STRONG signal
+
+# CVD (Cumulative Volume Delta) — price vs volume divergence
+# True = CVD divergence check করো (caution flag)
+CVD_ENABLED: bool = True
+
+# Cross-Exchange Basis (Futures vs Spot)
+# True = Basis calculate করে score bonus দাও (0-5 pts)
+CROSS_BASIS_ENABLED: bool  = True
+CROSS_BASIS_OVERHEATED: float = 0.50  # % এর বেশি basis = overheated
+CROSS_BASIS_BACKWARDATION: float = -0.15  # % এর কম = panic/backwardation
+
+# Liquidity Heatmap + TOD
+# True = Order book walls দেখে TP adjust করো
+HEATMAP_ENABLED: bool = True
+HEATMAP_SNAP_TOLERANCE_PCT: float = 0.8  # TP ±0.8% এর মধ্যে wall থাকলে snap
+
+# TOD (Time of Day) — NY Open fake breakout window
+# IST 19:30–19:45 = NY 09:00–09:15 = fake breakout high risk zone
+TOD_CAUTION_ENABLED: bool = True
+
+# Signal Score max এখন 135 (100 base + 35 advanced bonus)
+# Leverage thresholds এই scale এ adjust হয়েছে:
+#   Score 110+  → 20x (elite)
+#   Score  90+  → 20x (high conviction)
+#   Score  70+  → 17x (good)
+#   Score  55+  → 15x (moderate)
+#   Score <55   → skip suggestion
