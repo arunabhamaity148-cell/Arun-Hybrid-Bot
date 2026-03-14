@@ -147,22 +147,39 @@ async def _get_current_price(symbol: str) -> Optional[float]:
 def _calculate_signal_score(
     result:        "SignalResult",
     fg_val:        int,
-    warn_results:  dict,   # {"pullback_pass": bool, "pump_pass": bool, "vol_pass": bool}
+    warn_results:  dict,
+    ofi_bonus:     int = 0,
+    basis_bonus:   int = 0,
+    heatmap_bonus: int = 0,
+    regime_bonus:  int = 0,   # Regime detection: +10 aligned, -5 against
+    agent_bonus:   int = 0,   # Multi-agent: +8 PROCEED, -8 SKIP
+    pattern_bonus: int = 0,   # Candle patterns: -5 to +8
 ) -> tuple[int, dict]:
     """
-    Priority 4: 0-100 signal score।
-    Blocking filters সব pass করেছে, তাই এখানে শুধু quality judge করছি।
+    Signal Score — 0 to 160।
+    Base score: 0-100
+    Advanced bonuses: 0-60
 
-    Breakdown:
+    Base Breakdown:
       RR quality     → 30 pts
       Multi-TF       → 20 pts
       Funding rate   → 15 pts
       Fear & Greed   → 15 pts
       Session        → 10 pts
-      Warn filters   → 10 pts (pullback zone + pump age + volume)
+      Warn filters   → 10 pts
+
+    Advanced Bonuses:
+      OFI + CVD + Funding Divergence → max 25 pts
+      Cross-Exchange Basis           → max  5 pts
+      Liquidity Heatmap + TOD        → max  5 pts
+      Regime Detection               → -5 to +10 pts
+      Multi-Agent Cross-Check        → -8 to +8 pts
+      Candle Pattern Recognition     → -5 to +8 pts
     """
     score     = 0
     breakdown = {}
+
+    # ── Base Score (0-100) ────────────────────────────────────────────────────
 
     # RR (30 points)
     rr = result.rr or 0
@@ -183,41 +200,40 @@ def _calculate_signal_score(
     breakdown["MultiTF"] = conf_pts
 
     # Funding Rate (15 points)
-    fr = result.funding_rate_pct
     if result.funding_label == "NEUTRAL":
         fr_pts = 15
     elif result.funding_label in ("LONG_CAUTION", "SHORT_CAUTION"):
         fr_pts = 8
     elif result.funding_label == "DISABLED":
-        fr_pts = 10  # unknown = neutral assumption
+        fr_pts = 10
     else:
-        fr_pts = 2  # extreme = bad
+        fr_pts = 2  # extreme
     score += fr_pts
     breakdown["Funding"] = fr_pts
 
     # Fear & Greed (15 points)
     if 40 <= fg_val <= 65:
-        fg_pts = 15   # sweet spot
+        fg_pts = 15
     elif 25 <= fg_val <= 75:
         fg_pts = 9
     elif 10 <= fg_val <= 90:
         fg_pts = 5
     else:
-        fg_pts = 2   # extreme
+        fg_pts = 2
     score += fg_pts
     breakdown["FG"] = fg_pts
 
-    # Session (10 points) — London/NY overlap best for crypto
+    # Session (10 points)
     ist_hour = datetime.now(IST).hour
     if 16 <= ist_hour <= 21:      # NY Open (IST 16-22)
         sess_pts = 10
-    elif 13 <= ist_hour <= 16:    # London Open (IST 13-16)
+    elif 13 <= ist_hour <= 16:    # London Open
         sess_pts = 8
-    elif 9 <= ist_hour <= 13:     # Asia/London transition
+    elif 9 <= ist_hour <= 13:     # Asia/London
         sess_pts = 5
     elif 7 <= ist_hour <= 9:
         sess_pts = 3
-    else:                          # Dead zone
+    else:
         sess_pts = 1
     score += sess_pts
     breakdown["Session"] = sess_pts
@@ -225,16 +241,38 @@ def _calculate_signal_score(
     # Warn-only filters (10 points)
     warn_pts = 0
     if warn_results.get("pullback_pass", True):
-        warn_pts += 4   # golden zone pullback
+        warn_pts += 4
     if warn_results.get("pump_pass", True):
-        warn_pts += 3   # fresh pump
+        warn_pts += 3
     if warn_results.get("vol_pass", True):
-        warn_pts += 3   # volume confirms CHoCH
+        warn_pts += 3
     score += warn_pts
     breakdown["WarnFilters"] = warn_pts
 
-    breakdown["Total"] = score
-    return min(100, max(0, score)), breakdown
+    base_score = min(100, max(0, score))
+
+    # ── Advanced Bonuses ─────────────────────────────────────────────────────
+    ofi_b     = min(25, max(0,   ofi_bonus))
+    basis_b   = min(5,  max(0,   basis_bonus))
+    heatmap_b = min(5,  max(0,   heatmap_bonus))
+    regime_b  = min(10, max(-5,  regime_bonus))
+    agent_b   = min(8,  max(-8,  agent_bonus))
+    pattern_b = min(8,  max(-5,  pattern_bonus))
+    total_bonus = ofi_b + basis_b + heatmap_b + regime_b + agent_b + pattern_b
+
+    breakdown["OFI_Bonus"]     = ofi_b
+    breakdown["Basis_Bonus"]   = basis_b
+    breakdown["Heatmap_Bonus"] = heatmap_b
+    breakdown["Regime_Bonus"]  = regime_b
+    breakdown["Agent_Bonus"]   = agent_b
+    breakdown["Pattern_Bonus"] = pattern_b
+    breakdown["AdvBonus"]      = total_bonus
+
+    final = base_score + total_bonus
+    breakdown["Base"]  = base_score
+    breakdown["Total"] = final
+
+    return min(160, max(0, final)), breakdown
 
 
 # ── Main Engine ───────────────────────────────────────────────────────────────
@@ -451,7 +489,8 @@ class SignalEngine:
         except Exception:
             fg_val = 50
 
-        # Calculate signal score
+        # Calculate base signal score (advanced bonuses added by engine.py
+        # after OFI/CVD/Basis/Heatmap are fetched in parallel)
         result.signal_score, result.score_breakdown = _calculate_signal_score(
             result, fg_val, warn_results
         )
@@ -459,7 +498,7 @@ class SignalEngine:
         confluence_tag = " [MULTI-TF]" if result.multitf_confluence else ""
         logger.info(
             f"✨ SIGNAL: {symbol} {direction}{confluence_tag} | "
-            f"RR {levels['rr']:.1f} | Score {result.signal_score}/100 | "
+            f"RR {levels['rr']:.1f} | Score {result.signal_score}/135 | "
             f"Entry {entry:.6g}"
         )
         return result
