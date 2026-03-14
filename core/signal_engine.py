@@ -117,14 +117,6 @@ class SignalResult:
         return lines
 
 
-def _get_price_from_data(symbol: str, df) -> Optional[float]:
-    """DataFrame এর last close price নাও।"""
-    try:
-        if df is not None and not df.empty:
-            return float(df["close"].iloc[-1])
-    except Exception:
-        pass
-    return None
 
 
 async def _get_current_price(symbol: str) -> Optional[float]:
@@ -148,21 +140,6 @@ async def _get_current_price(symbol: str) -> Optional[float]:
         return None
 
 
-async def _get_klines(symbol: str, interval: str, limit: int):
-    """
-    Delta klines → Binance fallback।
-    """
-    if getattr(config, "USE_DELTA_DATA", False):
-        try:
-            from data.delta_client import delta
-            df = await delta.get_klines(symbol, interval, limit)
-            if df is not None and not df.empty:
-                return df
-        except Exception:
-            pass
-
-    from data.binance_client import binance
-    return await binance.get_klines(symbol, interval, limit)
 
 
 # ── Signal Score Calculator ───────────────────────────────────────────────────
@@ -389,7 +366,6 @@ class SignalEngine:
             result.filters.append(FilterResult("4F", "FUNDING", passed, msg))
             result.funding_rate_pct = fr_pct
 
-            fr_abs = abs(fr_pct)
             if fr_pct >= config.FUNDING_EXTREME_THRESHOLD:
                 result.funding_label = "EXTREME_LONG"
             elif fr_pct >= config.FUNDING_HIGH_THRESHOLD:
