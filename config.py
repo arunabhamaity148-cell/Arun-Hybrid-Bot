@@ -313,10 +313,33 @@ HEATMAP_SNAP_TOLERANCE_PCT: float = 0.8  # TP ±0.8% এর মধ্যে wall
 # IST 19:30–19:45 = NY 09:00–09:15 = fake breakout high risk zone
 TOD_CAUTION_ENABLED: bool = True
 
-# Signal Score max এখন 135 (100 base + 35 advanced bonus)
+# Signal Score max এখন 160 (100 base + 60 advanced bonus)
 # Leverage thresholds এই scale এ adjust হয়েছে:
-#   Score 110+  → 20x (elite)
-#   Score  90+  → 20x (high conviction)
-#   Score  70+  → 17x (good)
-#   Score  55+  → 15x (moderate)
-#   Score <55   → skip suggestion
+#   Score 130+  → 20x (elite)
+#   Score 110+  → 20x (high conviction)
+#   Score  85+  → 17x (good)
+#   Score  65+  → 15x (moderate)
+#   Score <50   → skip suggestion
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🧠 AI ADVANCED FEATURES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Regime Detection — market phase (Accumulation/Markup/Distribution/Markdown)
+# True = OpenAI/Ollama/Rule-based দিয়ে regime detect করো (+10/-5 pts)
+REGIME_DETECTION_ENABLED: bool = True
+
+# Multi-Agent Cross-Check — Bull vs Bear AI debate
+# True = 2 AI agents আলাদাভাবে signal check করে (+8/-8 pts)
+# OpenAI থাকলে 3 calls/signal। না থাকলে rule-based।
+MULTI_AGENT_ENABLED: bool = True
+
+# Dynamic SL/TP — ATR-based adaptive levels
+# True = market volatility দেখে SL/TP adjust করে
+# False = original grab level based SL রাখে
+DYNAMIC_PARAMS_ENABLED: bool = True
+
+# Pattern Recognition — candle patterns
+# True = Hammer/Engulfing/Morning Star ইত্যাদি detect করে (+8/-5 pts)
+# Ollama থাকলে AI-powered, না থাকলে rule-based (always free)
+PATTERN_RECOGNITION_ENABLED: bool = True
