@@ -14,6 +14,7 @@ from datetime import datetime
 import pytz
 
 import config
+from core.position_sizing import calculate_position
 from core.scanner      import scanner
 from core.signal_engine import signal_engine
 from data.binance_client import binance, VolumeAnomalyWatcher
@@ -246,19 +247,205 @@ class HybridEngine:
                         print(f"  🌙 DEAD ZONE — suppressed")
                         break
 
-                    # ── Fetch Market Intel (Priority 1+2+3) ───────────────
-                    # Signal pass হয়েছে — এখন 3 app থেকে deep intel নাও
-                    intel = None
+                    # ── Parallel fetch: Intel + OFI/CVD + Basis + Heatmap ─
+                    # Signal pass — এখন সব data parallel এ নাও (faster)
+                    from data.market_intel         import get_intel
+                    from data.ofi_cvd              import get_ofi_cvd
+                    from data.cross_basis          import get_cross_basis
+                    from filters.liquidity_heatmap import get_heatmap_result
+                    from data.pattern_recognition  import get_patterns
+
+                    # Get candles for pattern recognition
                     try:
-                        from data.market_intel import get_intel
-                        intel = await get_intel(symbol)
+                        if getattr(config, "USE_DELTA_DATA", False):
+                            from data.delta_client import delta
+                            _pat_df = await delta.get_klines(symbol, "15m", limit=15)
+                        else:
+                            _pat_df = None
+                        if _pat_df is None or _pat_df.empty:
+                            from data.binance_client import binance
+                            _pat_df = await binance.get_klines(symbol, "15m", limit=15)
+                        _pat_candles = _pat_df.tail(8).to_dict("records") if _pat_df is not None and not _pat_df.empty else []
+                    except Exception:
+                        _pat_candles = []
+
+                    (intel, ofi_result, basis_result,
+                     heatmap_result, pattern_result) = await asyncio.gather(
+                        get_intel(symbol),
+                        get_ofi_cvd(
+                            symbol=symbol,
+                            direction=direction,
+                            current_price=result.entry or 0,
+                            funding_rate=result.funding_rate_pct,
+                            funding_label=result.funding_label,
+                        ),
+                        get_cross_basis(symbol, direction),
+                        get_heatmap_result(
+                            symbol=symbol,
+                            direction=direction,
+                            current_price=result.entry or 0,
+                            original_tp1=result.tp1 or 0,
+                            original_tp2=result.tp2 or 0,
+                        ),
+                        get_patterns(symbol, direction, _pat_candles),
+                        return_exceptions=True,
+                    )
+
+                    # Handle exceptions from gather
+                    if isinstance(intel, Exception):
+                        logger.warning(f"Intel failed: {intel}")
+                        intel = None
+                    if isinstance(ofi_result, Exception):
+                        logger.warning(f"OFI/CVD failed: {ofi_result}")
+                        ofi_result = None
+                    if isinstance(basis_result, Exception):
+                        logger.warning(f"Basis failed: {basis_result}")
+                        basis_result = None
+                    if isinstance(heatmap_result, Exception):
+                        logger.warning(f"Heatmap failed: {heatmap_result}")
+                        heatmap_result = None
+                    if isinstance(pattern_result, Exception):
+                        logger.warning(f"Pattern failed: {pattern_result}")
+                        pattern_result = None
+
+                    # ── Regime Detection ──────────────────────────────────────
+                    from core.ai_regime import get_regime, get_multiagent
+                    intel_summary = intel.as_ai_context() if intel else ""
+                    ofi_lbl = ofi_result.ofi_label if ofi_result else "NEUTRAL"
+                    price_24h = scanner.get_gainer_info(symbol).get("change_pct", 0.0) if scanner.get_gainer_info(symbol) else 0.0
+
+                    regime_result, _ = await asyncio.gather(
+                        get_regime(
+                            symbol=symbol,
+                            direction=direction,
+                            btc_regime=regime_short,
+                            fg_val=fg_val,
+                            funding_rate=result.funding_rate_pct,
+                            ofi_label=ofi_lbl,
+                            price_change_24h=price_24h,
+                            intel_summary=intel_summary,
+                        ),
+                        asyncio.sleep(0),  # placeholder for parallel
+                        return_exceptions=True,
+                    )
+                    if isinstance(regime_result, Exception):
+                        regime_result = None
+
+                    # ── Dynamic SL/TP (ATR-based) ─────────────────────────────
+                    from filters.dynamic_params import get_dynamic_params
+                    regime_phase = regime_result.phase if regime_result else "UNKNOWN"
+                    dynamic = await get_dynamic_params(
+                        symbol=symbol,
+                        direction=direction,
+                        entry=result.entry or 0,
+                        original_sl=result.sl or 0,
+                        original_tp1=result.tp1 or 0,
+                        original_tp2=result.tp2 or 0,
+                        regime_phase=regime_phase,
+                        btc_regime=regime_short,
+                    )
+
+                    # Apply ATR-adjusted SL/TP if changed
+                    if dynamic and dynamic.sl_adjusted:
+                        result.sl   = dynamic.adjusted_sl
+                        result.tp1  = dynamic.adjusted_tp1
+                        result.tp2  = dynamic.adjusted_tp2
+                        result.sl_pct = abs(result.entry - result.sl) / result.entry * 100 if result.entry else result.sl_pct
+                        result.rr   = dynamic.rr_adjusted
+                        print(f"  📐 ATR SL adj: {dynamic.original_sl:.4g}→{result.sl:.4g} [{dynamic.volatility}]")
+
+                    # Snap TP to liquidity cluster if heatmap found walls
+                    if heatmap_result and heatmap_result.tp_adjusted:
+                        result.tp1 = heatmap_result.adjusted_tp1
+                        result.tp2 = heatmap_result.adjusted_tp2
+                        print(
+                            f"  🎯 TP snapped: TP1→{result.tp1:.6g} TP2→{result.tp2:.6g} "
+                            f"[{heatmap_result.liq_label}]"
+                        )
+
+                    # ── Multi-Agent Cross-Check ───────────────────────────────
+                    signal_summary = (
+                        f"RR:{result.rr:.1f} | BTC:{regime_short} | F&G:{fg_val} | "
+                        f"Funding:{result.funding_label} | OFI:{ofi_lbl} | "
+                        f"Regime:{regime_phase} | MultiTF:{result.multitf_confluence}"
+                    )
+                    multiagent_result = await get_multiagent(
+                        symbol=symbol,
+                        direction=direction,
+                        rr=result.rr or 0,
+                        multitf=result.multitf_confluence,
+                        ofi_label=ofi_lbl,
+                        cvd_diverging=ofi_result.cvd_divergence if ofi_result else False,
+                        funding_label=result.funding_label,
+                        regime_phase=regime_phase,
+                        fg_val=fg_val,
+                        signal_summary=signal_summary,
+                    )
+
+                    # Console prints
+                    if intel:
                         print(
                             f"  🔬 Intel: {intel.overall_sentiment} "
                             f"({intel.sentiment_score}/100) | "
                             f"CG: {intel.cg_bull_pct:.0f}%bull"
                         )
+                    if ofi_result:
+                        print(ofi_result.console_summary())
+                    if basis_result:
+                        print(f"  📊 Basis: {basis_result.basis_pct:+.3f}% [{basis_result.basis_label}]")
+                    if regime_result:
+                        print(f"  🌍 Regime: {regime_result.phase} [{regime_result.confidence}%] boost={regime_result.signal_boost:+d}")
+                    if multiagent_result:
+                        print(f"  🤝 Agents: {multiagent_result.verdict} [{multiagent_result.confidence}%]")
+                    if pattern_result and pattern_result.patterns_found:
+                        print(f"  🕯️ Patterns: {pattern_result.patterns_found} bonus={pattern_result.score_bonus:+d}")
+
+                    # ── Apply all bonuses to signal score ─────────────────────
+                    ofi_bonus      = ofi_result.total_bonus        if ofi_result      else 0
+                    basis_bonus    = basis_result.score            if basis_result    else 0
+                    heatmap_bonus  = heatmap_result.score          if heatmap_result  else 0
+                    regime_bonus   = regime_result.signal_boost    if regime_result   else 0
+                    agent_bonus    = multiagent_result.score_adj   if multiagent_result else 0
+                    pattern_bonus  = pattern_result.score_bonus    if pattern_result  else 0
+
+                    from core.signal_engine import _calculate_signal_score
+                    try:
+                        from data.coingecko_client import coingecko
+                        fg_data_fresh = await coingecko.get_fear_greed()
+                        fg_val_fresh  = fg_data_fresh.get("value", fg_val)
+                    except Exception:
+                        fg_val_fresh = fg_val
+
+                    warn_results_eng = {
+                        "pullback_pass": result.score_breakdown.get("WarnFilters", 0) >= 4,
+                        "pump_pass":     result.score_breakdown.get("WarnFilters", 0) >= 3,
+                        "vol_pass":      result.score_breakdown.get("WarnFilters", 0) >= 3,
+                    }
+                    result.signal_score, result.score_breakdown = _calculate_signal_score(
+                        result, fg_val_fresh, warn_results_eng,
+                        ofi_bonus=ofi_bonus,
+                        basis_bonus=basis_bonus,
+                        heatmap_bonus=heatmap_bonus,
+                        regime_bonus=regime_bonus,
+                        agent_bonus=agent_bonus,
+                        pattern_bonus=pattern_bonus,
+                    )
+
+                    # ── Position Sizing ──────────────────────────────────────
+                    pos_plan = None
+                    try:
+                        pos_plan = await calculate_position(
+                            symbol=symbol,
+                            direction=direction,
+                            entry_price=result.entry or 0,
+                            sl_price=result.sl or 0,
+                            tp1_price=result.tp1 or 0,
+                            tp2_price=result.tp2 or 0,
+                            signal_score=result.signal_score,
+                            rr=result.rr or 0,
+                        )
                     except Exception as exc:
-                        logger.warning(f"Intel fetch failed for {symbol}: {exc}")
+                        logger.warning(f"Position sizing failed: {exc}")
 
                     # ── AI Rating (with OHLCV + Intel) ────────────────────
                     from core.ai_rater import rate_signal, rating_emoji, should_suppress
@@ -306,7 +493,7 @@ class HybridEngine:
                     final_score = result.signal_score
                     if intel:
                         if intel.sentiment_score >= 70:
-                            final_score = min(100, final_score + 5)
+                            final_score = min(135, final_score + 5)
                         elif intel.sentiment_score <= 30:
                             final_score = max(0, final_score - 5)
                         result.signal_score = final_score
@@ -336,6 +523,7 @@ class HybridEngine:
 
                     await self._send_signal_telegram(
                         result=result,
+                        pos_plan=pos_plan,
                         gainer_info=scanner.get_gainer_info(symbol),
                         trending_rank=scanner.get_trending_rank(symbol),
                         is_anomaly=scanner.is_anomaly(symbol),
@@ -375,6 +563,7 @@ class HybridEngine:
         btc_regime, adx_part,
         now_str, sig_num,
         caution,
+        pos_plan=None,
         ai_rating: str = "N/A",
         ai_reason: str = "",
         intel=None,
@@ -422,19 +611,24 @@ class HybridEngine:
             choch_val = f"{result.choch_level:.8g}" if result.choch_level else "N/A"
             caution_line = "\n⚠️ <b>FEAR & GREED EXTREME — reduce size!</b>" if caution else ""
 
-            # Signal Score bar
+            # Signal Score bar (0-135 scale)
             score      = result.signal_score
-            score_bar  = "🟩" * (score // 20) + "⬜" * (5 - score // 20)
-            if score >= 80:
-                score_label = "🔥 HIGH CONVICTION"
+            score_bar  = "🟩" * min(5, score // 32) + "⬜" * (5 - min(5, score // 32))
+            if score >= 130:
+                score_label = "💎 ELITE SETUP"
+            elif score >= 110:
+                score_label = "🔥🔥 HIGH CONVICTION"
+            elif score >= 85:
+                score_label = "🔥 GOOD SETUP"
             elif score >= 65:
-                score_label = "✅ GOOD SETUP"
+                score_label = "✅ MODERATE"
             elif score >= 50:
-                score_label = "⚠️ MODERATE"
+                score_label = "⚠️ CAUTION"
             else:
                 score_label = "❗ WEAK — consider skipping"
 
-            breakdown = result.score_breakdown
+            breakdown  = result.score_breakdown
+            adv_bonus  = breakdown.get("AdvBonus", 0)
             score_detail = (
                 f"RR:{breakdown.get('RR',0)} "
                 f"TF:{breakdown.get('MultiTF',0)} "
@@ -443,9 +637,32 @@ class HybridEngine:
                 f"Sess:{breakdown.get('Session',0)} "
                 f"Warn:{breakdown.get('WarnFilters',0)}"
             )
+            adv_detail = (
+                f" +{adv_bonus}[OFI:{breakdown.get('OFI_Bonus',0)} "
+                f"Basis:{breakdown.get('Basis_Bonus',0)} "
+                f"Map:{breakdown.get('Heatmap_Bonus',0)} "
+                f"Rgm:{breakdown.get('Regime_Bonus',0):+d} "
+                f"Agt:{breakdown.get('Agent_Bonus',0):+d} "
+                f"Pat:{breakdown.get('Pattern_Bonus',0):+d}]"
+                if adv_bonus != 0 else ""
+            )
 
-            # Intel section (CoinGecko + CoinDesk + CMC)
-            intel_section = intel.as_telegram_section() if intel else ""
+            # Section builders
+            intel_section      = intel.as_telegram_section()           if intel           else ""
+            ofi_section        = ofi_result.telegram_section()       if ofi_result      else ""
+            basis_line         = basis_result.telegram_line()        if basis_result    else ""
+            heatmap_section    = heatmap_result.telegram_section()   if heatmap_result  else ""
+            regime_line        = regime_result.telegram_line()       if regime_result   else ""
+            agent_section      = multiagent_result.telegram_section() if multiagent_result else ""
+            pattern_line       = pattern_result.telegram_line()      if pattern_result and pattern_result.patterns_found else ""
+            dynamic_line       = dynamic.telegram_line()             if dynamic and (dynamic.sl_adjusted or dynamic.rr_relaxed or dynamic.rr_tightened) else ""
+            ofi_cautions = ""
+            if ofi_result and ofi_result.caution_flags:
+                flags = " | ".join(ofi_result.caution_flags)
+                ofi_cautions = f"\n⚠️ <b>Order Flow Caution:</b> {flags}"
+            regime_caution = ""
+            if regime_result and regime_result.caution:
+                regime_caution = f"\n⚠️ <b>Regime Caution:</b> {regime_result.phase} phase — reduce size"
 
             msg = (
                 f"🔥 <b>ARUNABHA HYBRID SIGNAL</b>{confluence_badge}\n\n"
@@ -460,10 +677,20 @@ class HybridEngine:
                 f"🎯 TP1: <code>{result.tp1:.8g}</code> (1.5R — 50% exit)\n"
                 f"🎯 TP2: <code>{result.tp2:.8g}</code> (3.0R — 50% exit)\n"
                 f"📐 RR: {result.rr:.2f}:1\n\n"
-                f"🎯 <b>Signal Score: {score}/100</b> — {score_label}\n"
-                f"{score_bar} [{score_detail}]\n\n"
+                f"🎯 <b>Signal Score: {score}/160</b> — {score_label}\n"
+                f"{score_bar} [{score_detail}{adv_detail}]\n\n"
                 f"📈 <b>Why This Coin:</b>\n{why_section}\n"
-                f"{intel_section}\n\n"
+                + (pos_plan.as_telegram_section() + "\n" if pos_plan and not pos_plan.skip_suggestion else "")
+                + (ofi_section + "\n" if ofi_section else "")
+                + (f"{basis_line}\n" if basis_line else "")
+                + (f"{regime_line}\n" if regime_line else "")
+                + (f"{pattern_line}\n" if pattern_line else "")
+                + (agent_section + "\n" if agent_section else "")
+                + (heatmap_section + "\n" if heatmap_section else "")
+                + (f"{dynamic_line}\n" if dynamic_line else "")
+                + (ofi_cautions + "\n" if ofi_cautions else "")
+                + (regime_caution + "\n" if regime_caution else "")
+                + f"{intel_section}\n\n"
                 f"📊 <b>Market Context:</b>\n"
                 f"• BTC: {btc_regime} ({adx_part})\n"
                 f"• Fear & Greed: {fg_val} ({fg_class}){caution_line}\n"
